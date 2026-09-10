@@ -1,0 +1,54 @@
+name: build
+
+# Monorepo: one folder per mod. A tag like `mewdaily-v1.0.0` builds ./mewdaily
+# and attaches the DLL to that release.
+on:
+  push:
+    tags: ['*-v*']
+  workflow_dispatch:
+    inputs:
+      mod:
+        description: mod folder to build
+        required: true
+        default: mewdaily
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve mod folder
+        id: mod
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "dir=${{ github.event.inputs.mod }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "dir=${GITHUB_REF_NAME%%-v*}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build
+        shell: cmd
+        run: cd ${{ steps.mod.outputs.dir }} && build.bat
+
+      - name: SHA-256
+        shell: cmd
+        run: certutil -hashfile ${{ steps.mod.outputs.dir }}\winmm.dll SHA256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.mod.outputs.dir }}
+          path: |
+            ${{ steps.mod.outputs.dir }}/winmm.dll
+            ${{ steps.mod.outputs.dir }}/dllmain.cpp
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.mod.outputs.dir }}/winmm.dll
