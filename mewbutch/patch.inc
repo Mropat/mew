@@ -17,9 +17,20 @@ struct Asm {
     }
 };
 
-// Difficulty is tested first; a run harder than required satisfies the tier on
-// its own, bypassing both the act and chapter pins. At the top tier there is
-// nothing above impossible without limit-break gear, so difficulty 3 clamps.
+// Acts are the adventures (3 of them, 4 chapters each); difficulty is a third
+// axis over the whole grid. Butch walks act/chapter upward to A3C4, then holds
+// there and escalates difficulty.
+//
+// Rule: one difficulty step above what he asks for excuses a LOWER ACT, but
+// never a lower chapter. So "A3 C4 hard" also takes "A1/A2 C4 crazy".
+//
+//   not a veteran           -> reject
+//   chapter < required      -> reject      (always enforced)
+//   difficulty < required   -> reject
+//   difficulty > required   -> accept, act not checked
+//   difficulty >= impossible-> accept, act not checked  (nothing higher exists
+//                                       without limit-break gear)
+//   otherwise               -> act enforced as vanilla
 static size_t build_patch(BYTE* blk, BYTE* fail, BYTE* acc,
                           BYTE* get_act, BYTE* get_chap, BYTE* get_diff,
                           BYTE* out, size_t cap) {
@@ -27,18 +38,18 @@ static size_t build_patch(BYTE* blk, BYTE* fail, BYTE* acc,
     a.raw("\x48\x8D\xBF\x00\x0C\x00\x00", 7);  // lea   rdi,[rdi+0xc00]
     a.raw("\xF6\x47\xF8\x02", 4);              // test  byte [rdi-8], 2   veteran
     a.jcc(0x74, fail);
+    a.raw("\x0F\xBE\x5F\x09", 4);              // movsx ebx, byte [rdi+9]    chapter
+    a.raw("\x48\x8B\xCE", 3); a.call(get_chap);
+    a.raw("\x3B\xD8", 2); a.jcc(0x7C, fail);   // chapter is never excused
     a.raw("\x0F\xBE\x5F\x0A", 4);              // movsx ebx, byte [rdi+0xa]  difficulty
     a.raw("\x48\x8B\xCE", 3); a.call(get_diff);
     a.raw("\x3B\xD8", 2);
-    a.jcc(0x7C, fail);                         // jl  reject  below requirement
-    a.jcc(0x7F, acc);                          // jg  accept  harder than required
+    a.jcc(0x7C, fail);                         // jl  reject
+    a.jcc(0x7F, acc);                          // jg  accept - lower act excused
     a.raw("\x83\xFB\x03", 3);                  // cmp ebx, 3
-    a.jcc(0x7D, acc);                          // jge accept  clamp at impossible
+    a.jcc(0x7D, acc);                          // jge accept - clamp at impossible
     a.raw("\x0F\xBE\x5F\x08", 4);              // movsx ebx, byte [rdi+8]    act
     a.raw("\x48\x8B\xCE", 3); a.call(get_act);
-    a.raw("\x3B\xD8", 2); a.jcc(0x7C, fail);
-    a.raw("\x0F\xBE\x5F\x09", 4);              // movsx ebx, byte [rdi+9]    chapter
-    a.raw("\x48\x8B\xCE", 3); a.call(get_chap);
     a.raw("\x3B\xD8", 2); a.jcc(0x7C, fail);
     a.jcc(0xEB, acc);
     if (a.n > cap) return 0;
