@@ -26,11 +26,12 @@ Removing that second branch makes the refresh run daily. Shop level is never
 touched, so the item count stays at six and **your save stays vanilla** - remove
 the mod and everything is exactly as it was.
 
+## Why not GON
 The data-only route is a trap, and worth knowing about even if you never use
 this mod: you *can* force refreshes by granting `shop_level_up` on a repeating
 favour, but shop level is **written into the save and never recomputed**. Past
 level 4 the game asks for a `stock_fill_order` entry that does not exist, and
-the shop crashes on open - with the mod installed *or not*. That save is stuck.
+the shop crashes on open - with the mod installed *or not*. That save is bricked.
 
 ## Safety
 
