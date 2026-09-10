@@ -1,4 +1,4 @@
-## Vibegenics, procceed with caution
+## Vibegenics, proceed with caution
 # mew
 
 Mewgenics mods. One folder per mod; each builds to its own DLL.
@@ -8,4 +8,4 @@ Mewgenics mods. One folder per mod; each builds to its own DLL.
 | [mewdaily](mewdaily) | Baby Jack's shop restocks daily instead of weekly |
 
 Releases are built by GitHub Actions, so every published DLL is traceable to a
-commit and a public build log. Tag `<mod>-v<version>` to cut one.
+commit and a public build log.
