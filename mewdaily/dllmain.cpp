@@ -15,19 +15,15 @@
 // Neutralising that second jne makes the refresh run every day, leaving shop
 // level (and therefore the save) completely untouched.
 //
-// Ships as a winmm.dll proxy: Mewgenics imports only timeBeginPeriod and
-// timeEndPeriod, and winmm is not a KnownDLL, so a copy beside the exe wins.
+// Ships as a mewjector mod: drop mewdaily.dll into Mewgenics/mods/ and the
+// chainloader loads it after the loader lock is released. No proxying here -
+// mewjector owns version.dll and handles that for every mod.
 
 #include <windows.h>
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
 #include <vector>
-
-// All 180 exports of the real winmm are forwarded via winmm.def, so any module
-// in the process that imports winmm.dll resolves correctly through us. That
-// also means no LoadLibrary here: calling it under the loader lock in DllMain
-// is unsafe and was breaking process startup.
 
 // ------------------------------------------------------------- logging ----
 static void logf(const char* fmt, ...) {

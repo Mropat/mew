@@ -38,17 +38,17 @@ jobs:
 
       - name: SHA-256
         shell: cmd
-        run: certutil -hashfile ${{ steps.mod.outputs.dir }}\winmm.dll SHA256
+        run: certutil -hashfile ${{ steps.mod.outputs.dir }}\${{ steps.mod.outputs.dir }}.dll SHA256
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.mod.outputs.dir }}
           path: |
-            ${{ steps.mod.outputs.dir }}/winmm.dll
+            ${{ steps.mod.outputs.dir }}/${{ steps.mod.outputs.dir }}.dll
             ${{ steps.mod.outputs.dir }}/dllmain.cpp
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.mod.outputs.dir }}/winmm.dll
+          files: ${{ steps.mod.outputs.dir }}/${{ steps.mod.outputs.dir }}.dll
