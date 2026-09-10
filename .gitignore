@@ -3,3 +3,5 @@
 *.lib
 *.pdb
 *.dll
+*.exe
+cpp_bytes.txt
