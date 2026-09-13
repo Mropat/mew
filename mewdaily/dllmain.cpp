@@ -1,4 +1,4 @@
-// mewdaily - Mewgenics daily shop refresh
+// mewdaily - Baby Jack's shop restocks daily instead of weekly
 //
 // Mewgenics refreshes a house shop when EITHER the stock vector size no longer
 // matches (shop_level + 2), OR the in-game weekday equals the shop's refresh day:
@@ -23,13 +23,15 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
-#include <vector>
 
-// ------------------------------------------------------------- logging ----
-static void logf(const char* fmt, ...) {
+#include "patches.inc"
+
+// ------------------------------------------------------------------ logging --
+
+static void logf_(const char* fmt, ...) {
     char path[MAX_PATH];
     if (!GetModuleFileNameA(GetModuleHandleA(NULL), path, MAX_PATH)) return;
-    char* slash = strrchr(path, '\\');
+    char* slash = strrchr(path, (char)92);
     if (!slash) return;
     lstrcpyA(slash + 1, "mewdaily.log");
     FILE* f = fopen(path, "a");
@@ -40,26 +42,6 @@ static void logf(const char* fmt, ...) {
     fputc('\n', f);
     fclose(f);
 }
-
-// ----------------------------------------------------------- signature ----
-// 0xFFFF marks a wildcard byte.
-static const int SIG[] = {
-    0x8B,0x87,0x74,0x02,0x00,0x00,        // mov  eax,[rdi+0x274]   shop level
-    0x83,0xC0,0x02,                       // add  eax, 2
-    0x48,0x98,                            // cdqe
-    0x48,0x3B,0xC1,                       // cmp  rax, rcx
-    0x75,0xFFFF,                          // jne  refresh
-    0x45,0x33,0xC0,                       // xor  r8d, r8d
-    0x48,0x8D,0x55,0xFFFF,                // lea  rdx,[rbp-0x69]
-    0x48,0x8B,0x1D,0xFFFF,0xFFFF,0xFFFF,0xFFFF,
-    0x48,0x8B,0xCB,                       // mov  rcx, rbx
-    0xE8,0xFFFF,0xFFFF,0xFFFF,0xFFFF,     // call <calendar>
-    0x39,0x70,0x0C,                       // cmp  [rax+0xc], esi   weekday
-    0x0F,0x85                             // jne  skip  <-- patch site
-};
-static const size_t SIG_LEN   = sizeof(SIG) / sizeof(SIG[0]);
-static const size_t GATE_OFF  = 41;   // bytes from match start to the 0F 85
-static const size_t GATE_SIZE = 6;    // length of the near jne
 
 static bool text_section(BYTE* base, BYTE** out, size_t* len) {
     IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)base;
@@ -77,49 +59,52 @@ static bool text_section(BYTE* base, BYTE** out, size_t* len) {
     return false;
 }
 
-static void apply_patch() {
+// ------------------------------------------------------------------ applying --
+
+static void apply_patches() {
     BYTE* base = (BYTE*)GetModuleHandleA(NULL);
     BYTE* text; size_t len;
-    if (!text_section(base, &text, &len)) { logf("[mewdaily] no .text section"); return; }
+    if (!text_section(base, &text, &len)) { logf_("mewdaily: no .text section"); return; }
 
-    std::vector<BYTE*> hits;
-    for (size_t i = 0; i + SIG_LEN < len; ++i) {
-        size_t j = 0;
-        for (; j < SIG_LEN; ++j)
-            if (SIG[j] != 0xFFFF && text[i + j] != (BYTE)SIG[j]) break;
-        if (j == SIG_LEN) hits.push_back(text + i);
-        if (hits.size() > 1) break;               // ambiguous: stop early
+    // Locate everything before writing anything, so a table that only partly
+    // matches leaves the game alone instead of half-patched.
+    BYTE* at[COUNT(PATCHES)];
+    for (size_t i = 0; i < COUNT(PATCHES); ++i) {
+        at[i] = locate(PATCHES[i], base, text, len);
+        if (at[i] == AMBIGUOUS) {
+            logf_("mewdaily: \"%s\" matches more than once - patching nothing",
+                  PATCHES[i].description);
+            return;
+        }
+        if (!at[i]) {
+            logf_("mewdaily: \"%s\" not found - patching nothing",
+                  PATCHES[i].description);
+            return;
+        }
+        if (at[i] != base + PATCHES[i].rva)
+            logf_("mewdaily: \"%s\" moved to +%#llx", PATCHES[i].description,
+                  (unsigned long long)(at[i] - base));
     }
 
-    // Refuse to write unless the match is unique. Zero means the game updated
-    // and the pattern must be re-derived; more than one means it is too loose.
-    if (hits.size() != 1) {
-        logf("[mewdaily] %zu signature matches - not patching (need exactly 1)", hits.size());
-        return;
+    for (size_t i = 0; i < COUNT(PATCHES); ++i) {
+        const BytePatch& p = PATCHES[i];
+        BYTE* dst = at[i] + p.write_at;
+        DWORD old;
+        if (!VirtualProtect(dst, p.write_len, PAGE_EXECUTE_READWRITE, &old)) {
+            logf_("mewdaily: VirtualProtect failed (%lu)", GetLastError());
+            return;
+        }
+        memcpy(dst, p.write, p.write_len);
+        VirtualProtect(dst, p.write_len, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), dst, p.write_len);
+        logf_("mewdaily: +%#llx  %s", (unsigned long long)(dst - base), p.description);
     }
-
-    BYTE* gate = hits[0] + GATE_OFF;
-    if (gate[0] != 0x0F || gate[1] != 0x85) {
-        logf("[mewdaily] gate bytes unexpected: %02X %02X - not patching", gate[0], gate[1]);
-        return;
-    }
-
-    DWORD old;
-    if (!VirtualProtect(gate, GATE_SIZE, PAGE_EXECUTE_READWRITE, &old)) {
-        logf("[mewdaily] VirtualProtect failed (%lu)", GetLastError());
-        return;
-    }
-    memset(gate, 0x90, GATE_SIZE);
-    VirtualProtect(gate, GATE_SIZE, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), gate, GATE_SIZE);
-    logf("[mewdaily] patched weekday gate at +0x%llX - shop refreshes daily",
-         (unsigned long long)(gate - base));
 }
 
 BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(h);
-        apply_patch();
+        apply_patches();
     }
     return TRUE;
 }

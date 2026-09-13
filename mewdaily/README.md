@@ -33,22 +33,50 @@ favour, but shop level is **written into the save and never recomputed**. Past
 level 4 the game asks for a `stock_fill_order` entry that does not exist, and
 the shop crashes on open - with the mod installed *or not*. That save is bricked.
 
+## How it is structured
+
+`patches.inc` is a registry - one entry per thing the mod does to the game:
+
+```cpp
+static const BytePatch PATCHES[] = {
+    { "restock the house shop every day, not just on its refresh weekday",
+      0x1C4F07 - 41, WEEKDAY_GATE, COUNT(WEEKDAY_GATE),
+      41, NOP6, COUNT(NOP6) },
+};
+```
+
+The RVA is where the region lived in 1.1.b21239, and it is a **hint, not an
+address the mod trusts**. The bytes are checked there first; if they do not
+match, the region is searched for by pattern, and if that finds it more than
+once the mod patches nothing at all. Writing six bytes to a remembered offset
+without checking what is at it is the one thing this must never do - after a
+game update those bytes land in the middle of whatever moved into that offset,
+and the crash shows up somewhere else entirely, long after the write.
+
+Patches are all located before any is written, so a table that only partly
+matches leaves the game alone rather than half-patched.
+
 ## Safety
 
-- Finds the patch site by **signature scan**, not a hardcoded offset, so a game
-  update that shifts code is handled.
-- Patches only if there is **exactly one** match, and only if the bytes there
-  are still the expected `0F 85`. Zero or several matches: it logs and does
-  nothing. The worst case is the game running unmodded.
-- Writes `mewdaily.log` next to the game exe so you can see what happened.
-- Touches six bytes in memory. `Mewgenics.exe` on disk is never modified.
+- The write window is covered by the verified pattern: every byte overwritten is
+  a byte that was checked first, operand wildcards included.
+- Same length in, same length out - no code shifts.
+- Writes `mewdaily.log` beside the game exe, naming the address and what was
+  done, or which region failed to match and why nothing was patched.
+- Nothing is written to your save. Shop level is untouched, so the save stays
+  vanilla-compatible. Remove the DLL and behaviour is exactly vanilla.
 
-Full source is [dllmain.cpp](dllmain.cpp) - about 100 lines, and worth a read
-before you run someone else's DLL. Verify the download against the SHA-256
-printed in the Actions run for the release.
+`test_locate.cpp` checks the registry through the same `patches.inc` the mod
+uses: that it finds the region where it remembers it, still finds it after the
+code moves, refuses when a checked byte changed, refuses when the match is
+ambiguous, and that the write window never extends past the verified bytes.
+Pass a real `Mewgenics.exe` to also assert the table resolves uniquely against
+the shipped binary:
 
-**Antivirus:** an unsigned DLL that calls `VirtualProtect` and writes to another
-module's memory can trip heuristics. That is what this mod does by design.
+```
+clang++ -O2 -o test_locate.exe test_locate.cpp
+./test_locate.exe "C:/Program Files (x86)/Steam/steamapps/common/Mewgenics/Mewgenics.exe"
+```
 
 ## Uninstall
 
