@@ -15,18 +15,6 @@ struct Site {
     unsigned char sig[24];
 };
 
-// Returns -1 when every site matches, otherwise the index of the first that
-// does not. `out` is filled with the resolved addresses either way.
-static int verify_sites(const Site* sites, int count, size_t siglen,
-                        unsigned char* base, unsigned char** out) {
-    int bad = -1;
-    for (int i = 0; i < count; i++) {
-        out[i] = base + sites[i].rva;
-        if (bad < 0 && memcmp(out[i], sites[i].sig, siglen) != 0) bad = i;
-    }
-    return bad;
-}
-
 // jmp qword [rip+0] ; <8-byte target>
 //
 // Fourteen bytes, and it clobbers no register. That matters: the obvious

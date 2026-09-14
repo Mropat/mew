@@ -33,6 +33,9 @@ MODS = {
         ("MAP_HAS",      0x183db0, "is this cat id a node in the tree?"),
         ("MAP_FIND",     0x184d40, "look a cat id up in the tree's node map"),
     ],
+    "no_more_overflow_flies": [
+        ("CHARINIT", 0x0f70f0, "Character::init(std::string, bool, bool)"),
+    ],
     "mewbutch": [
         ("EVAL",     0x276600, "npc condition evaluator(self, condition, cat) -> bool"),
         ("REQ_ACT",  0x276940, "required_act(self)"),

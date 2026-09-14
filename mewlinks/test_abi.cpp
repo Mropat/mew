@@ -59,7 +59,7 @@ int main() {
     check(w.size == 0 && w.cap == 7 && w.buf[0] == 0, "wstring is empty with capacity 7");
 
     // ---- std::function ------------------------------------------------------
-    void* const comp = (void*)0xDEADBEEF;
+    void* const comp = (void*)(size_t)0xDEADBEEF;   // size_t: MSVC warns C4312 otherwise
     MsvcFunction fn;
     fn_init(&fn, comp, 1, 0);
     check((void*)fn.impl == (void*)fn.storage, "impl is stored inline, as the game's lambdas are");

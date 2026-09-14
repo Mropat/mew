@@ -30,6 +30,27 @@ static bool hookapi_init() {
     return g_have_mj;
 }
 
+// Verify sites, allowing for the fact that another mod may have got here first.
+//
+// A signature check reads the bytes at an RVA and compares them to the game's
+// prologue. That is exactly wrong once Mewjector manages the site: the bytes
+// there are its jump, so the check fails and the mod refuses to install for the
+// one reason it should not - that a second mod wanted the same function.
+//
+// Mewjector verified those bytes itself when the first hook went in, so where
+// it reports an existing hook, trust that instead of looking.
+static int verify_sites_chained(const Site* sites, int count, size_t siglen,
+                                unsigned char* base, unsigned char** out) {
+    int bad = -1;
+    for (int i = 0; i < count; i++) {
+        out[i] = base + sites[i].rva;
+        if (bad >= 0) continue;
+        if (g_have_mj && g_mj.QueryHook(sites[i].rva) > 0) continue;   // already managed
+        if (memcmp(out[i], sites[i].sig, siglen) != 0) bad = i;
+    }
+    return bad;
+}
+
 // Returns the function to call to continue the chain - the next hook, or the
 // original - or null if the hook could not be installed.
 static void* install_hook(unsigned rva, unsigned char* site, size_t fallback_stolen,

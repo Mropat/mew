@@ -125,13 +125,13 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     DisableThreadLibraryCalls(mod);
 
     g_base = (unsigned char*)GetModuleHandleA(NULL);
-    int bad = verify_sites(SITES, SITE_COUNT, SITE_SIGLEN, g_base, g_at);
+    const bool chained = hookapi_init();
+    int bad = verify_sites_chained(SITES, SITE_COUNT, SITE_SIGLEN, g_base, g_at);
     if (bad >= 0) {
         logf_("mewbutch: %s at +%#x does not match - not installing",
               SITES[bad].name, SITES[bad].rva);
         return TRUE;                                  // leave the game alone
     }
-    const bool chained = hookapi_init();
     g_orig_eval = (EvalFn)install_hook(SITES[S_EVAL].rva, g_at[S_EVAL], STOLEN,
                                        (const void*)&hooked_eval, "mewbutch");
     if (!g_orig_eval) { logf_("mewbutch: could not install the hook"); return TRUE; }
