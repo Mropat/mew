@@ -16,7 +16,7 @@ the house**, so you can see at a glance which portraits will take you somewhere
 before you click any of them.
 
 Built for **Mewgenics 1.1.b21239**. Drop `mewlinks.dll` into `Mewgenics/mods/`
-next to [mewjector](https://github.com/Ivanca/mewjector)'s `version.dll`.
+next to [mewjector](https://github.com/githubuser508/mewjector)'s `version.dll`.
 
 ## The cat info panel
 
