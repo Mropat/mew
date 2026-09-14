@@ -18,7 +18,7 @@
 // below is small enough to live in its own inline buffer, so each destructor is
 // a no-op and nothing here is ever freed.
 
-struct MsvcString {                 // 0x20 bytes
+struct alignas(16) MsvcString {                 // 0x20 bytes
     char   buf[16];
     size_t size;
     size_t cap;
@@ -38,7 +38,7 @@ static bool str_init(MsvcString* s, const char* lit) {
     return true;
 }
 
-struct MsvcWString {                // 0x20 bytes
+struct alignas(16) MsvcWString {                // 0x20 bytes
     unsigned short buf[8];
     size_t size;
     size_t cap;
@@ -74,7 +74,7 @@ struct FnImpl {
     unsigned long long kind;
 };
 
-struct MsvcFunction {               // 0x40 bytes
+struct alignas(16) MsvcFunction {               // 0x40 bytes
     unsigned char storage[0x38];
     FnImpl*       impl;
 };
@@ -110,6 +110,11 @@ static void fn_init(MsvcFunction* f, void* a, unsigned long long b,
 // The three layouts above are only correct if they come out this size; a
 // compiler that padded them differently would corrupt the game's stack.
 static_assert(sizeof(MsvcString)   == 0x20, "std::string must be 0x20 bytes");
+// 16-byte aligned for the same reason the curve points are: the game may read
+// any of these back with movaps, which faults on an 8-aligned address.
+static_assert(alignof(MsvcString)  == 16, "must be 16-byte aligned");
+static_assert(alignof(MsvcWString) == 16, "must be 16-byte aligned");
+static_assert(alignof(MsvcFunction)== 16, "must be 16-byte aligned");
 static_assert(sizeof(MsvcWString)  == 0x20, "std::wstring must be 0x20 bytes");
 static_assert(sizeof(MsvcFunction) == 0x40, "std::function must be 0x40 bytes");
 static_assert(sizeof(FnVtbl)       == 6 * sizeof(void*), "vtable must have 6 slots");

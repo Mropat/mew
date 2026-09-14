@@ -357,7 +357,17 @@ static const Stroke REACHABLE = {
     { 0.0f, 0.0f, 0.0f, 1.0f }, MARK_THICKNESS, 1, 1, 2.0, 0, { 0, 0, 0, 0, 0, 0, 0 }
 };
 
-struct Pt { double x, y; };
+// The game reads these back with movaps - an *aligned* 16-byte load - so they
+// need 16-byte alignment, which two doubles do not get on their own: the type's
+// natural alignment is 8, and a compiler is free to place it there. clang put
+// them on 16 by luck; MSVC did not, and the released build faulted on the first
+// family tree it drew.
+//
+// This is the third bug of exactly this shape. Anything handed to the game that
+// it might load with movaps gets alignas(16) and an assertion, whether or not
+// the crash has been seen yet.
+struct alignas(16) Pt { double x, y; };
+static_assert(alignof(Pt) == 16, "curve points must be 16-byte aligned");
 
 #define OFF_HUD_MAP      0x140      // FamilyTreeHud -> map of cat id to node
 #define OFF_NODE_X       0x48       // layout node position
