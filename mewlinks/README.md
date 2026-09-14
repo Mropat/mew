@@ -122,19 +122,21 @@ The click is a no-op when it cannot reach the cat. The icons are not greyed out
 ## Build
 
 ```
-clang++ -O2 -shared -static -s -o mewlinks.dll dllmain.cpp
+build.bat
 ```
 
-or with MSVC:
+It picks MSVC when available and llvm-mingw otherwise, compiles `version.rc`
+alongside, and needs `..\common` on the include path. By hand:
 
 ```
-cl /nologo /LD /O2 /EHsc /DNDEBUG dllmain.cpp /link /DLL /OUT:mewlinks.dll
+clang++ -O2 -shared -static -s -I../common -o mewlinks.dll dllmain.cpp version.res
 ```
 
-Either works, because the mod never includes `<string>` or `<functional>`.
-`register_button` takes all three arguments **by value**, so the mod has to hand
-the game three real MSVC STL objects; `msvcabi.inc` mirrors the layouts read out
-of the exe instead of borrowing whatever STL the mod is compiled against:
+Either compiler works, because the mod never includes `<string>` or
+`<functional>`. `register_button` takes all three arguments **by value**, so it
+has to hand the game three real MSVC STL objects; `common/msvcabi.inc` mirrors
+the layouts read out of the exe instead of borrowing whatever STL it was built
+against:
 
 ```
 sizeof(std::string)           == 0x20   buffer 16, size +0x10, capacity +0x18
@@ -144,44 +146,73 @@ the inline callable           == { vptr; captures }
 vtable                        == _Copy _Move _Do_call _Target_type _Delete_this _Get
 ```
 
-`register_button` destroys all three before returning; every object here is
-small enough to live inline, so each destructor is a no-op and nothing is freed.
+Everything handed across that boundary is `alignas(16)` with an assertion. The
+game reads several of these back with `movaps`, an *aligned* load, and two
+doubles do not get 16-byte alignment on their own - a detail that produced three
+crashes visible only in MSVC builds.
 
-`test_abi.cpp` replays what the game does with them — copy into the Button,
-invoke, destroy with the deallocate flag the game computes — and checks the
-callback arrives with the right captures:
+`test_abi.cpp` replays what the game does with those objects and checks the
+build-identity logic. It runs in CI under the same compiler that builds the
+released DLL.
 
-```
-clang++ -O2 -o test_abi.exe test_abi.cpp && ./test_abi.exe
-```
+## Hooking, and other mods
+
+Hooks go in through mewjector's chain API - `MJ_InstallHook` at priority 50 - so
+**other mods can hook the same functions**. `HouseCatStatus::init` in particular
+is a place anyone doing cat-UI work will want. Several mods on one address form
+a priority-ordered chain, each handed a trampoline to call the next.
+
+Passing `stolenBytes = 0` lets mewjector's length disassembler pick where to cut
+the prologue. `common/detour.inc` is a fallback for when the API is absent; it
+never overwrites a site mewjector already manages, because that would break
+whoever got there first.
 
 ## When the game updates
 
-`sites.inc` pins seven call targets by RVA plus the first 16 bytes found there.
-A single mismatch aborts the whole install: the hook is never written, the game
-runs unmodified, and `mod_logs/mewlinks.log` names the site that moved. Regenerate it
-against a new build with `tools/make_sig.py`.
+`sites.inc` pins fifteen call targets by RVA plus the first 24 bytes found at
+each, and is regenerated with `tools/make_sig.py mewlinks`.
+
+The signature bytes are the authority: they ask *is the code I expected still at
+this RVA*, which stays true across a game update that never touched these
+functions - so the mod keeps working after an unrelated patch. The one thing
+they cannot answer is a site another mod has already hooked, where the bytes are
+mewjector's jump. Only then does the recorded build identity (PE `TimeDateStamp`
+and `SizeOfImage`, which no hook rewrites) get a vote:
+
+```
+site untouched             -> the bytes decide, whatever build this is
+site hooked, known build   -> trust whoever verified it before us
+site hooked, unknown build -> nobody can vouch for it; refuse
+```
+
+A refusal installs nothing at all: the game runs unmodified and
+`mod_logs/mewlinks.log` names the site.
 
 | site | what it is |
 | --- | --- |
-| `0x0e9ac0` | `HouseCatStatus::init` — hooked; registers the panel's buttons |
+| `0x0e9ac0` | `HouseCatStatus::init` � hooked; registers the panel's buttons |
+| `0x17f7b0` | the family tree's per-frame pass � hooked |
 | `0x97c2b0` | `MenuPanel::register_button` |
+| `0x97d590` | the `Button` constructor, which takes a clip pointer |
 | `0x0ec7b0` | `HouseCatStatus::show_cat` |
 | `0x0ecc30` | the house view; `+0x88` is the zoomed room, null when zoomed out |
 | `0x96b470` | `ensure_singleton(holder, type_id)` |
-| `0x054500` | the object every button stores at `Button+0x88` |
 | `0x0d7220` | `CatRegistry::resolve(id)` |
-
-The hook is a plain detour: 13 bytes of prologue (eight pushes) are moved into a
-trampoline and replaced with a 12-byte absolute jump plus a `nop`. The stolen
-bytes are pushes only, so nothing position-dependent moves, and the game's own
-unwind info still describes the frame correctly.
+| `0x18ccd0` | the tree's exit action |
+| `0x17ddd0` | strokes one edge into the tree's graphics batch |
 
 ## Notes
 
-- Does not touch saves. It adds two buttons to a UI panel and changes which cat
-  that panel is looking at; nothing is written to disk.
-- If the portraits start animating on hover, that is the `Button` frame state —
-  buttons drive their clip's frames. Registering on `lover_tt` / `hater_tt`
-  instead (change `g_clip` in `dllmain.cpp`) puts the hit region on the existing
-  invisible tooltip rects instead of the artwork.
+- **Does not touch saves.** It adds buttons to UI panels and changes which cat
+  is selected; nothing is written to disk. Remove the DLL and behaviour is
+  exactly vanilla.
+- **Coexists with other mods** that hook the same functions, through mewjector's
+  hook chain. Without mewjector's API it falls back to hooking alone.
+- **Logs one line per launch** to `Mewgenics/mod_logs/mewlinks.log`, truncated
+  each run. Build with `/DMEWLINKS_TRACE` for a line per click.
+- **Antivirus false positives.** A mod that hooks a game process does the same
+  things a scanner looks for - writing to another process's code - and an
+  unsigned binary nobody has downloaded before has no reputation to offset that.
+  One release was flagged as `Trojan:Win32/Wacatac.B!ml`, submitted to
+  Microsoft, and cleared on review. If you hit one, the DLL is built in public
+  by GitHub Actions and every release links the run that produced it.
