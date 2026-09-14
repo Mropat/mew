@@ -10,7 +10,17 @@ Mewgenics mods. One folder per mod; each builds to its own DLL.
 | [mewlinks](mewlinks) | Click a lover, rival or family tree portrait to select that cat in the house |
 
 Releases are built by GitHub Actions, so every published DLL is traceable to a
-commit and a public build log.
+commit and a public build log. Each mod's tests run there too, with the same
+compiler that builds the artifact — three alignment bugs once reached a release
+because the tests only ever ran locally against different codegen.
+
+A tagged build is published as a **prerelease**. It is promoted only after the
+downloaded artifact itself has been tested, not a local build of the same
+source:
+
+```
+gh release edit <tag> --prerelease=false --latest
+```
 
 ## Layout
 

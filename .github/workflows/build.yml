@@ -38,6 +38,20 @@ jobs:
         shell: cmd
         run: cd ${{ steps.mod.outputs.dir }} && build.bat
 
+      # The tests only ever ran on a developer machine, with a different
+      # compiler than the one that builds what people download. Three alignment
+      # bugs reached a release that way: clang happened to place structs on 16
+      # and MSVC did not. Run them here, against the shipping codegen.
+      - name: Test
+        shell: cmd
+        working-directory: ${{ steps.mod.outputs.dir }}
+        run: |
+          for %%t in (test_*.cpp) do (
+            echo === %%t ===
+            cl /nologo /EHsc /O2 /I..\common %%t /Fe:%%~nt.exe || exit /b 1
+            %%~nt.exe || exit /b 1
+          )
+
       - name: SHA-256
         shell: cmd
         run: certutil -hashfile ${{ steps.mod.outputs.dir }}\${{ steps.mod.outputs.dir }}.dll SHA256
@@ -49,8 +63,13 @@ jobs:
             ${{ steps.mod.outputs.dir }}/${{ steps.mod.outputs.dir }}.dll
             ${{ steps.mod.outputs.dir }}/dllmain.cpp
 
+      # Published as a prerelease. What gets tested has to be the artifact
+      # people download, not a local build of the same source, so promoting to a
+      # full release is a deliberate step after that has actually happened:
+      #     gh release edit <tag> --prerelease=false --latest
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          prerelease: true
           files: ${{ steps.mod.outputs.dir }}/${{ steps.mod.outputs.dir }}.dll
