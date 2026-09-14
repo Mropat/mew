@@ -20,14 +20,16 @@
 
 static void* g_seen_comp;
 static unsigned long long g_seen_which;
+static unsigned long long g_seen_kind;
 static int g_calls;
 
-#include "msvcabi.inc"
+#include "../common/msvcabi.inc"
 
-// The stub msvcabi.inc forward-declares; stands in for the real click handler.
-static void link_click(void* comp, unsigned long long which) {
-    g_seen_comp  = comp;
-    g_seen_which = which;
+// msvcabi.inc forward-declares this; here it stands in for the real handler.
+static void on_button_click(void* a, unsigned long long b, unsigned long long kind) {
+    g_seen_comp  = a;
+    g_seen_which = b;
+    g_seen_kind  = kind;
     g_calls++;
 }
 
@@ -59,7 +61,7 @@ int main() {
     // ---- std::function ------------------------------------------------------
     void* const comp = (void*)0xDEADBEEF;
     MsvcFunction fn;
-    fn_init(&fn, comp, 1);
+    fn_init(&fn, comp, 1, 0);
     check((void*)fn.impl == (void*)fn.storage, "impl is stored inline, as the game's lambdas are");
 
     // The Button copy-constructs its own std::function from ours. MSVC does
@@ -68,7 +70,8 @@ int main() {
     memset(&held, 0, sizeof(held));
     held.impl = fn.impl->vt->copy(fn.impl, held.storage);
     check((void*)held.impl == (void*)held.storage, "_Copy returns the destination storage");
-    check(held.impl->comp == comp && held.impl->which == 1, "_Copy carries the captures across");
+    check(held.impl->a == comp && held.impl->b == 1 && held.impl->kind == 0,
+          "_Copy carries the captures across");
 
     // The caller's copy is then destroyed. Inline impl means dealloc is false.
     bool dealloc = ((void*)fn.impl != (void*)&fn);
@@ -77,14 +80,15 @@ int main() {
 
     // Clicking the button invokes the copy the Button kept.
     held.impl->vt->do_call(held.impl);
-    check(g_calls == 1 && g_seen_comp == comp && g_seen_which == 1,
-          "_Do_call reaches link_click with the right captures");
+    check(g_calls == 1 && g_seen_comp == comp && g_seen_which == 1 && g_seen_kind == 0,
+          "_Do_call reaches the handler with the right captures");
 
-    // A second button, built for the other icon, must stay independent.
+    // A button of a different kind - a family tree portrait - must not alias it.
     MsvcFunction fn0;
-    fn_init(&fn0, comp, 0);
+    fn_init(&fn0, 0, 7, 1);
     fn0.impl->vt->do_call(fn0.impl);
-    check(g_calls == 2 && g_seen_which == 0, "the lover and rival callbacks do not alias");
+    check(g_calls == 2 && g_seen_which == 7 && g_seen_kind == 1,
+          "panel-icon and tree-portrait callbacks do not alias");
 
     printf("\n%s\n", g_fails ? "FAILED" : "all checks passed");
     return g_fails != 0;

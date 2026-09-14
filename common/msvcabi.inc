@@ -65,10 +65,13 @@ struct FnVtbl {
     void*       (*get)(FnImpl*);
 };
 
+// The captures. One callable shape serves every button the mod registers;
+// `kind` says which, and the meaning of `a` and `b` follows from it.
 struct FnImpl {
-    const FnVtbl* vt;
-    void*         comp;             // the HouseCatStatus component
-    unsigned long long which;       // 0 = lover, 1 = rival
+    const FnVtbl*      vt;
+    void*              a;
+    unsigned long long b;
+    unsigned long long kind;
 };
 
 struct MsvcFunction {               // 0x40 bytes
@@ -76,31 +79,32 @@ struct MsvcFunction {               // 0x40 bytes
     FnImpl*       impl;
 };
 
-static void link_click(void* comp, unsigned long long which);   // defined below
+// Defined by the mod: what a click does.
+static void on_button_click(void* a, unsigned long long b, unsigned long long kind);
 
 static FnImpl* fn_copy(FnImpl* self, void* dest) {
     FnImpl* d = (FnImpl*)dest;
-    d->vt    = self->vt;
-    d->comp  = self->comp;
-    d->which = self->which;
+    *d = *self;
     return d;
 }
-static void fn_do_call(FnImpl* self)          { link_click(self->comp, self->which); }
+static void fn_do_call(FnImpl* self) { on_button_click(self->a, self->b, self->kind); }
 static const void* fn_target_type(FnImpl*)    { return 0; }
 static void fn_delete_this(FnImpl*, bool)     { }    // always inline; never owns
-static void* fn_get(FnImpl* self)             { return &self->comp; }
+static void* fn_get(FnImpl* self)             { return &self->a; }
 
 static const FnVtbl FN_VTBL = {
     fn_copy, fn_copy, fn_do_call, fn_target_type, fn_delete_this, fn_get
 };
 
-static void fn_init(MsvcFunction* f, void* comp, unsigned long long which) {
+static void fn_init(MsvcFunction* f, void* a, unsigned long long b,
+                    unsigned long long kind) {
     for (size_t i = 0; i < sizeof(*f); i++) ((char*)f)[i] = 0;
     FnImpl* impl = (FnImpl*)f->storage;      // stored inline, like the game's
-    impl->vt    = &FN_VTBL;
-    impl->comp  = comp;
-    impl->which = which;
-    f->impl     = impl;
+    impl->vt   = &FN_VTBL;
+    impl->a    = a;
+    impl->b    = b;
+    impl->kind = kind;
+    f->impl    = impl;
 }
 
 // The three layouts above are only correct if they come out this size; a

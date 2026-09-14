@@ -1,13 +1,24 @@
 # mewlinks
 
-Makes the **lover** and **rival** portraits on the cat info panel clickable. Click
-one and the panel jumps to that cat, the same way the `<` `>` arrows move through
-the list â€” which also highlights them in the house.
+**Click a cat's picture, go to that cat.** Two places in the house UI show you a
+cat you cannot get to, and this makes both of them clickable:
+
+| you click | you get |
+| --- | --- |
+| the **lover** or **rival** portrait on the cat info panel | that cat, selected in the house |
+| any portrait in the **family tree** | that ancestor, if it is still in the house |
+
+Selecting works the same way the panel's own `<` `>` arrows do, so the cat is
+highlighted in the house exactly as if you had picked it yourself.
+
+The family tree also **marks the edge leading up to every cat that is still in
+the house**, so you can see at a glance which portraits will take you somewhere
+before you click any of them.
 
 Built for **Mewgenics 1.1.b21239**. Drop `mewlinks.dll` into `Mewgenics/mods/`
 next to [mewjector](https://github.com/Ivanca/mewjector)'s `version.dll`.
 
-## What it does
+## The cat info panel
 
 The cat info panel is a `glaiel::MenuPanel` subclass. It builds its own buttons
 by name out of its movieclip:
@@ -28,6 +39,45 @@ separate `lover_tt` / `hater_tt` regions.
 So this mod hooks the panel's init, lets it register its six buttons, and then
 registers `lover` and `hater` as two more. Nothing about rendering changes; the
 portraits were already drawn and already kept up to date.
+
+## The family tree
+
+The tree registers no buttons at all, so there is no named-child route here. But
+`register_button` is only a wrapper: the `Button` constructor underneath takes a
+clip **pointer**, so any clip can become one. The catch is which object it wants
+— a portrait entry's `+0x98` is the clip *component*, and what the constructor
+binds is the display object under it at `[component+0x80]`, which links back at
+`+0x40`. Handing it the component crashes inside the binder.
+
+Clicking has to **leave the tree before selecting**. Selecting while the tree is
+open provably works — `show_cat` returns and the panel holds the new cat — and
+is then thrown away when the tree tears down. So the mod runs the tree's own exit
+action first. That action's callback reads nothing but its captured hud, so a
+two-field stand-in for the `std::function` it normally lives in is enough to
+invoke it.
+
+### Marking the reachable edges
+
+The tree strokes its edges black into a vector-graphics batch, and lights the
+hovered cat's two edges white over the top. Marked edges use the same mechanism:
+same black, at just over the weight the highlight uses, so they read as part of
+the existing design rather than as a second highlight competing with the first.
+
+The rule is deliberately **not** the hover rule. Hovering lights both edges
+*above* a cat, up to its parents. What is wanted here is the one edge *below*
+each living cat, connecting it down into the tree — so the loop runs over
+children instead: for every node, if one of its parents is in the house, draw
+that node's edge up to that parent. Each living cat is the parent of exactly one
+node, so it gets exactly one edge, and the examined cat is nobody's parent, so
+the root correctly gets none.
+
+Timing matters more than it looks. The tree only redraws when the hovered cat
+changes: it clears the batch, then strokes base and highlight edges. Anything
+added has to go on at that exact moment or it is wiped, and at no other moment or
+it accumulates every frame. The hud records which cat it last drew for, so
+comparing against that identifies precisely the right frames.
+
+`MARK_THICKNESS` in `dllmain.cpp` is the one number worth tuning.
 
 ## Reaching the cat you clicked
 

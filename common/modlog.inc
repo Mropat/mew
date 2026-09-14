@@ -23,8 +23,13 @@ static void logf_(const char* fmt, ...) {
     CreateDirectoryA(path, NULL);                       // harmless if it exists
     lstrcatA(path, "\\" MODLOG_NAME ".log");
 
-    FILE* f = fopen(path, "a");
+    // Truncate on the first line of each run. A mod that says one thing per
+    // launch would otherwise leave a file that only ever grows, and the last
+    // run - the one anyone would be asking about - would be buried.
+    static bool started = false;
+    FILE* f = fopen(path, started ? "a" : "w");
     if (!f) return;
+    started = true;
     va_list ap; va_start(ap, fmt);
     vfprintf(f, fmt, ap);
     va_end(ap);
