@@ -120,7 +120,9 @@ static InitFn     g_orig_init;
 static TreePassFn g_orig_tree_pass;
 static void*      g_panel;          // the HouseCatStatus component, once built
 static void*      g_hud;            // the open family tree, for exiting it
-static unsigned long long g_drawn_for = ~0ull - 1;   // hover state we last drew on
+// Not a cat id any tree will ever hover: -1 already means "nothing hovered".
+#define NEVER_DRAWN (~0ull - 1)
+static unsigned long long g_drawn_for = NEVER_DRAWN;  // hover state we last drew on
 
 #include "../common/msvcabi.inc"
 
@@ -299,6 +301,12 @@ static void add_tree_buttons(void* hud) {
     for (void** q = (void**)first; q != head && n < MAX_PORTRAITS; q = (void**)*q) n++;
     if (first != g_last_first || n != g_last_count) {
         g_last_first = first; g_last_count = n; g_done_n = 0;
+        // A rebuild clears the graphics batch too, so the marked edges are gone
+        // and have to be redrawn - even if the hovered cat is unchanged. It
+        // usually is: two trees opened back to back both start with nothing
+        // hovered, so keying the redraw on the hover alone silently skips the
+        // second one until the mouse happens to move over a portrait.
+        g_drawn_for = NEVER_DRAWN;
         TRACE("new family tree: %u portraits", n);
     }
 
