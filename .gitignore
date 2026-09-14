@@ -8,3 +8,4 @@ cpp_bytes.txt
 
 # working notes, not part of the mods
 .claude/
+*.res

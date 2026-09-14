@@ -39,15 +39,32 @@ static void write_jmp(unsigned char* at, const void* dest) {
 static void* install_detour(unsigned char* site, size_t stolen, const void* detour) {
     if (stolen < JMP_LEN) return 0;
 
+    // Allocate writable, then make it executable - never both at once.
+    //
+    // A page that is simultaneously writable and executable is one of the
+    // loudest signals a heuristic scanner looks for, and PAGE_EXECUTE_READWRITE
+    // is how it is usually spelled. Writing the trampoline first and flipping
+    // to PAGE_EXECUTE_READ afterwards is the same result without ever holding
+    // that combination. It is also just better hygiene: nothing needs to write
+    // to a trampoline once it has been built.
     unsigned char* tramp = (unsigned char*)VirtualAlloc(
-        NULL, 128, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        NULL, 128, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!tramp) return 0;
 
     memcpy(tramp, site, stolen);
     write_jmp(tramp + stolen, site + stolen);
 
+    DWORD prev;
+    if (!VirtualProtect(tramp, 128, PAGE_EXECUTE_READ, &prev)) {
+        VirtualFree(tramp, 0, MEM_RELEASE);
+        return 0;
+    }
+
+    // Likewise for the patch site: the game's code has to be made writable to
+    // patch it, but it does not have to be writable *and* executable while we
+    // do. PAGE_READWRITE for the write, then its original protection back.
     DWORD old;
-    if (!VirtualProtect(site, stolen, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!VirtualProtect(site, stolen, PAGE_READWRITE, &old)) {
         VirtualFree(tramp, 0, MEM_RELEASE);
         return 0;
     }

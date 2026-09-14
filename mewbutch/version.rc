@@ -1,0 +1,32 @@
+#include <winver.h>
+
+// Version metadata. A DLL with no description, product or company looks
+// anonymous to reputation heuristics, which is part of why a freshly built
+// unsigned mod gets flagged. This does not make it trusted - only signing
+// does - but it stops it being blank.
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    1,0,3,0
+PRODUCTVERSION 1,0,3,0
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_DLL
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Mropat"
+            VALUE "FileDescription",  "Butch accepts cats from harder runs of earlier acts"
+            VALUE "FileVersion",      "1.0.3.0"
+            VALUE "InternalName",     "mewbutch"
+            VALUE "OriginalFilename", "mewbutch.dll"
+            VALUE "ProductName",      "mew - Mewgenics mods"
+            VALUE "ProductVersion",   "1.0.3.0"
+            VALUE "Comments",         "Open source: https://github.com/Mropat/mew"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
