@@ -6,6 +6,12 @@
 #define SITE_COUNT 15
 #define SITE_SIGLEN 24
 
+// The build these RVAs were read from. Taken from the PE header, which no
+// hook ever rewrites - so this still identifies the game correctly even
+// when another mod has already patched every site we care about.
+#define GAME_TIMESTAMP   0x6a9c51e5u
+#define GAME_SIZEOFIMAGE 0x01574000u
+
 static const Site SITES[SITE_COUNT] = {
     // HouseCatStatus::init  - registers the panel's buttons
     { "INIT", 0x0e9ac0u, { 0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8d, 0xac, 0x24, 0x68, 0xfc, 0xff, 0xff, 0x48, 0x81, 0xec } },

@@ -6,6 +6,12 @@
 #define SITE_COUNT 4
 #define SITE_SIGLEN 24
 
+// The build these RVAs were read from. Taken from the PE header, which no
+// hook ever rewrites - so this still identifies the game correctly even
+// when another mod has already patched every site we care about.
+#define GAME_TIMESTAMP   0x6a9c51e5u
+#define GAME_SIZEOFIMAGE 0x01574000u
+
 static const Site SITES[SITE_COUNT] = {
     // npc condition evaluator(self, condition, cat) -> bool
     { "EVAL", 0x276600u, { 0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x48, 0x89, 0x7c, 0x24, 0x18, 0x41, 0x56, 0x48, 0x83, 0xec, 0x50, 0x49, 0x8b, 0xf8 } },

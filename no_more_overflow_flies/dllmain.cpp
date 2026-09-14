@@ -84,7 +84,8 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
 
     g_base = (unsigned char*)GetModuleHandleA(NULL);
     const bool chained = hookapi_init();
-    int bad = verify_sites_chained(SITES, SITE_COUNT, SITE_SIGLEN, g_base, g_at);
+    int bad = verify_sites_chained(SITES, SITE_COUNT, SITE_SIGLEN, g_base, g_at,
+                                   GAME_TIMESTAMP, GAME_SIZEOFIMAGE);
     if (bad >= 0) {
         logf_("no_more_overflow_flies: %s at +%#x does not match - not installing",
               SITES[bad].name, SITES[bad].rva);

@@ -23,6 +23,8 @@ static unsigned long long g_seen_which;
 static unsigned long long g_seen_kind;
 static int g_calls;
 
+#include "../common/hookapi.inc"
+#include "sites.inc"
 #include "../common/msvcabi.inc"
 
 // msvcabi.inc forward-declares this; here it stands in for the real handler.
@@ -89,6 +91,75 @@ int main() {
     fn0.impl->vt->do_call(fn0.impl);
     check(g_calls == 2 && g_seen_which == 7 && g_seen_kind == 1,
           "panel-icon and tree-portrait callbacks do not alias");
+
+    // ---- the build check --------------------------------------------------
+    // Once other mods have hooked every site, this is the only thing still able
+    // to tell us the game was rebuilt - so it has to reject as well as accept.
+    puts("\nbuild identity");
+    {
+        static unsigned char img[0x400];
+        memset(img, 0, sizeof(img));
+        IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)img;
+        dos->e_magic = IMAGE_DOS_SIGNATURE;
+        dos->e_lfanew = 0x80;
+        IMAGE_NT_HEADERS64* nt = (IMAGE_NT_HEADERS64*)(img + 0x80);
+        nt->Signature = IMAGE_NT_SIGNATURE;
+        nt->FileHeader.TimeDateStamp   = GAME_TIMESTAMP;
+        nt->OptionalHeader.SizeOfImage = GAME_SIZEOFIMAGE;
+
+        check(verify_build(img, GAME_TIMESTAMP, GAME_SIZEOFIMAGE),
+              "accepts the build the RVAs came from");
+
+        nt->FileHeader.TimeDateStamp = GAME_TIMESTAMP + 1;
+        check(!verify_build(img, GAME_TIMESTAMP, GAME_SIZEOFIMAGE),
+              "rejects a rebuilt game (timestamp moved)");
+        nt->FileHeader.TimeDateStamp = GAME_TIMESTAMP;
+
+        nt->OptionalHeader.SizeOfImage = GAME_SIZEOFIMAGE + 0x1000;
+        check(!verify_build(img, GAME_TIMESTAMP, GAME_SIZEOFIMAGE),
+              "rejects a differently sized image");
+        nt->OptionalHeader.SizeOfImage = GAME_SIZEOFIMAGE;
+
+        nt->Signature = 0;
+        check(!verify_build(img, GAME_TIMESTAMP, GAME_SIZEOFIMAGE),
+              "rejects a non-PE image");
+        nt->Signature = IMAGE_NT_SIGNATURE;
+
+        dos->e_magic = 0;
+        check(!verify_build(img, GAME_TIMESTAMP, GAME_SIZEOFIMAGE), "rejects garbage");
+        dos->e_magic = IMAGE_DOS_SIGNATURE;
+    }
+
+    // ---- what the build check is and is not allowed to gate ----------------
+    // A vanilla rebuild that leaves our functions alone must still install: the
+    // signature bytes can answer for themselves there, so a changed timestamp
+    // is none of their business. Only a site we cannot read falls back to it.
+    puts("\nan unrelated game update");
+    {
+        static unsigned char img[0x2000];
+        memset(img, 0, sizeof(img));
+        IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)img;
+        dos->e_magic = IMAGE_DOS_SIGNATURE;
+        dos->e_lfanew = 0x80;
+        IMAGE_NT_HEADERS64* nt = (IMAGE_NT_HEADERS64*)(img + 0x80);
+        nt->Signature = IMAGE_NT_SIGNATURE;
+        nt->FileHeader.TimeDateStamp   = GAME_TIMESTAMP + 99;   // rebuilt
+        nt->OptionalHeader.SizeOfImage = GAME_SIZEOFIMAGE + 99;
+
+        Site one = { "ONE", 0x1000, { 0 } };
+        memcpy(one.sig, SITES[0].sig, SITE_SIGLEN);
+        memcpy(img + 0x1000, SITES[0].sig, SITE_SIGLEN);        // code unmoved
+
+        unsigned char* out[1];
+        check(verify_sites_chained(&one, 1, SITE_SIGLEN, img, out,
+                                   GAME_TIMESTAMP, GAME_SIZEOFIMAGE) == -1,
+              "new build, our code unchanged -> still installs");
+
+        img[0x1000] ^= 0xFF;                                    // code moved
+        check(verify_sites_chained(&one, 1, SITE_SIGLEN, img, out,
+                                   GAME_TIMESTAMP, GAME_SIZEOFIMAGE) == 0,
+              "new build, our code changed -> refuses");
+    }
 
     printf("\n%s\n", g_fails ? "FAILED" : "all checks passed");
     return g_fails != 0;
