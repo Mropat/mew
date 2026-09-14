@@ -47,7 +47,7 @@
 
 // ------------------------------------------------------- pinned call targets --
 
-#include "../common/detour.inc"
+#include "../common/hookapi.inc"
 #include "sites.inc"
 
 static unsigned char* g_base;
@@ -116,8 +116,8 @@ static bool hooked_eval(void* self, int condition, void* cat) {
 
 // ------------------------------------------------------------------- install --
 
-// Three register spills - 15 bytes, position independent, and inside the 24
-// bytes the signature verifies.
+// Fallback steal length, used only when Mewjector is absent: three register
+// spills, 15 bytes. With it, stolenBytes = 0 and its length disassembler picks.
 #define STOLEN 15
 
 BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
@@ -131,8 +131,11 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
               SITES[bad].name, SITES[bad].rva);
         return TRUE;                                  // leave the game alone
     }
-    g_orig_eval = (EvalFn)install_detour(g_at[S_EVAL], STOLEN, (const void*)&hooked_eval);
-    if (!g_orig_eval) { logf_("mewbutch: could not install the detour"); return TRUE; }
-    logf_("mewbutch: a harder run now excuses a lower act");
+    const bool chained = hookapi_init();
+    g_orig_eval = (EvalFn)install_hook(SITES[S_EVAL].rva, g_at[S_EVAL], STOLEN,
+                                       (const void*)&hooked_eval, "mewbutch");
+    if (!g_orig_eval) { logf_("mewbutch: could not install the hook"); return TRUE; }
+    logf_("mewbutch: a harder run now excuses a lower act%s",
+          chained ? "" : " (standalone hook - Mewjector API not found)");
     return TRUE;
 }

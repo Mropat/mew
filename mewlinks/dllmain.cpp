@@ -58,7 +58,7 @@
 #define TRACE(...) ((void)0)
 #endif
 
-#include "../common/detour.inc"
+#include "../common/hookapi.inc"
 #include "sites.inc"
 
 static unsigned char* g_base;
@@ -446,11 +446,13 @@ static void hooked_tree_pass(void* hud) {
 
 // ------------------------------------------------------------------- install --
 
-// Eight pushes plus the frame-pointer lea - 21 bytes, all position independent,
-// and inside the 24 bytes the signature verifies.
+// Fallback steal lengths, used only when Mewjector is absent. With it, they are
+// its problem: stolenBytes = 0 and its length disassembler picks the boundary.
+//
+//   init: eight pushes plus the frame-pointer lea, 21 bytes
+//   tree: mov rax,rsp plus eight pushes, 15 bytes - and that first instruction
+//         is why a trampoline jump must not touch RAX, see common/detour.inc
 #define STOLEN_INIT 21
-// mov rax,rsp plus eight pushes. That first instruction is exactly why the
-// trampoline's jump must not touch RAX; see common/detour.inc.
 #define STOLEN_TREE 15
 
 BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
@@ -464,14 +466,17 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
               SITES[bad].name, SITES[bad].rva);
         return TRUE;                                  // leave the game alone
     }
-    g_orig_init = (InitFn)install_detour(g_at[S_INIT], STOLEN_INIT,
-                                         (const void*)&hooked_init);
-    g_orig_tree_pass = (TreePassFn)install_detour(g_at[S_TREE_PASS], STOLEN_TREE,
-                                                  (const void*)&hooked_tree_pass);
+    const bool chained = hookapi_init();
+    g_orig_init = (InitFn)install_hook(SITES[S_INIT].rva, g_at[S_INIT], STOLEN_INIT,
+                                       (const void*)&hooked_init, "mewlinks");
+    g_orig_tree_pass = (TreePassFn)install_hook(SITES[S_TREE_PASS].rva, g_at[S_TREE_PASS],
+                                                STOLEN_TREE, (const void*)&hooked_tree_pass,
+                                                "mewlinks");
     if (!g_orig_init || !g_orig_tree_pass) {
-        logf_("mewlinks: could not install the detours");
+        logf_("mewlinks: could not install hooks");
         return TRUE;
     }
-    logf_("mewlinks: relationship icons and family tree portraits are clickable");
+    logf_("mewlinks: relationship icons and family tree portraits are clickable%s",
+          chained ? "" : " (standalone hooks - Mewjector API not found)");
     return TRUE;
 }
