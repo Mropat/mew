@@ -19,29 +19,11 @@
 // chainloader loads it after the loader lock is released. No proxying here -
 // mewjector owns version.dll and handles that for every mod.
 
-#include <windows.h>
-#include <cstdio>
-#include <cstdarg>
-#include <cstring>
+#define MODLOG_NAME "mewdaily"
+#include "../common/modlog.inc"
 
 #include "patches.inc"
 
-// ------------------------------------------------------------------ logging --
-
-static void logf_(const char* fmt, ...) {
-    char path[MAX_PATH];
-    if (!GetModuleFileNameA(GetModuleHandleA(NULL), path, MAX_PATH)) return;
-    char* slash = strrchr(path, (char)92);
-    if (!slash) return;
-    lstrcpyA(slash + 1, "mewdaily.log");
-    FILE* f = fopen(path, "a");
-    if (!f) return;
-    va_list ap; va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
-}
 
 static bool text_section(BYTE* base, BYTE** out, size_t* len) {
     IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)base;

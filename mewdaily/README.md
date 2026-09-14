@@ -61,7 +61,7 @@ matches leaves the game alone rather than half-patched.
 - The write window is covered by the verified pattern: every byte overwritten is
   a byte that was checked first, operand wildcards included.
 - Same length in, same length out - no code shifts.
-- Writes `mewdaily.log` beside the game exe, naming the address and what was
+- Writes `mod_logs/mewdaily.log`, naming the address and what was
   done, or which region failed to match and why nothing was patched.
 - Nothing is written to your save. Shop level is untouched, so the save stays
   vanilla-compatible. Remove the DLL and behaviour is exactly vanilla.

@@ -42,27 +42,9 @@
 //
 // Ships as a mewjector mod: drop mewlinks.dll into Mewgenics/mods/.
 
-#include <windows.h>
-#include <cstdio>
-#include <cstdarg>
-#include <cstring>
+#define MODLOG_NAME "mewlinks"
+#include "../common/modlog.inc"
 
-// ------------------------------------------------------------------ logging --
-
-static void logf_(const char* fmt, ...) {
-    char path[MAX_PATH];
-    if (!GetModuleFileNameA(GetModuleHandleA(NULL), path, MAX_PATH)) return;
-    char* slash = strrchr(path, (char)92);
-    if (!slash) return;
-    lstrcpyA(slash + 1, "mewlinks.log");
-    FILE* f = fopen(path, "a");
-    if (!f) return;
-    va_list ap; va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
-}
 
 #ifdef MEWLINKS_TRACE
 #define TRACE(...) logf_(__VA_ARGS__)
@@ -72,12 +54,7 @@ static void logf_(const char* fmt, ...) {
 
 // ------------------------------------------------------- pinned call targets --
 
-struct Site {
-    const char*   name;
-    unsigned      rva;
-    unsigned char sig[16];
-};
-
+#include "../common/detour.inc"
 #include "sites.inc"
 
 static unsigned char* g_base;
@@ -260,61 +237,23 @@ static void hooked_init(void* comp) {
 
 // ------------------------------------------------------------------- install --
 
-// The init prologue is eight pushes - 13 bytes - so a 12-byte absolute jump
-// lands on an instruction boundary with one byte to spare.
-#define STOLEN 13
-
-static bool verify_sites() {
-    bool ok = true;
-    for (int i = 0; i < SITE_COUNT; i++) {
-        unsigned char* p = g_base + SITES[i].rva;
-        if (memcmp(p, SITES[i].sig, SITE_SIGLEN) != 0) {
-            logf_("  %s at +%#x does not match - refusing to install",
-                  SITES[i].name, SITES[i].rva);
-            ok = false;
-        }
-        g_at[i] = p;
-    }
-    return ok;
-}
-
-static void write_abs_jmp(unsigned char* at, void* dest) {
-    at[0] = 0x48; at[1] = 0xB8;                       // mov rax, imm64
-    memcpy(at + 2, &dest, 8);
-    at[10] = 0xFF; at[11] = 0xE0;                     // jmp rax
-}
-
-static bool install() {
-    unsigned char* site = g_at[S_INIT];
-
-    unsigned char* tramp = (unsigned char*)VirtualAlloc(
-        NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) { logf_("  VirtualAlloc failed"); return false; }
-
-    memcpy(tramp, site, STOLEN);
-    write_abs_jmp(tramp + STOLEN, site + STOLEN);
-    g_orig_init = (InitFn)tramp;
-
-    DWORD old;
-    if (!VirtualProtect(site, STOLEN, PAGE_EXECUTE_READWRITE, &old)) {
-        logf_("  VirtualProtect failed");
-        return false;
-    }
-    write_abs_jmp(site, (void*)&hooked_init);
-    site[12] = 0x90;                                  // pad the spare byte
-    VirtualProtect(site, STOLEN, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), site, STOLEN);
-    return true;
-}
+// Eight pushes plus the frame-pointer lea - 21 bytes, all position independent,
+// and inside the 24 bytes the signature verifies.
+#define STOLEN 21
 
 BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(mod);
 
     g_base = (unsigned char*)GetModuleHandleA(NULL);
-    logf_("mewlinks: base %p", g_base);
-    if (!verify_sites()) return TRUE;                 // leave the game alone
-    if (!install())      return TRUE;
+    int bad = verify_sites(SITES, SITE_COUNT, SITE_SIGLEN, g_base, g_at);
+    if (bad >= 0) {
+        logf_("mewlinks: %s at +%#x does not match - not installing",
+              SITES[bad].name, SITES[bad].rva);
+        return TRUE;                                  // leave the game alone
+    }
+    g_orig_init = (InitFn)install_detour(g_at[S_INIT], STOLEN, (const void*)&hooked_init);
+    if (!g_orig_init) { logf_("mewlinks: could not install the detour"); return TRUE; }
     logf_("mewlinks: %u link regions armed", (unsigned)LINK_COUNT);
     return TRUE;
 }

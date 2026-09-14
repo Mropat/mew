@@ -35,27 +35,9 @@
 //
 // Ships as a mewjector mod: drop mewbutch.dll into Mewgenics/mods/.
 
-#include <windows.h>
-#include <cstdio>
-#include <cstdarg>
-#include <cstring>
+#define MODLOG_NAME "mewbutch"
+#include "../common/modlog.inc"
 
-// ------------------------------------------------------------------ logging --
-
-static void logf_(const char* fmt, ...) {
-    char path[MAX_PATH];
-    if (!GetModuleFileNameA(GetModuleHandleA(NULL), path, MAX_PATH)) return;
-    char* slash = strrchr(path, (char)92);
-    if (!slash) return;
-    lstrcpyA(slash + 1, "mewbutch.log");
-    FILE* f = fopen(path, "a");
-    if (!f) return;
-    va_list ap; va_start(ap, fmt);
-    vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    fclose(f);
-}
 
 #ifdef MEWBUTCH_TRACE
 #define TRACE(...) logf_(__VA_ARGS__)
@@ -65,12 +47,7 @@ static void logf_(const char* fmt, ...) {
 
 // ------------------------------------------------------- pinned call targets --
 
-struct Site {
-    const char*   name;
-    unsigned      rva;
-    unsigned char sig[16];
-};
-
+#include "../common/detour.inc"
 #include "sites.inc"
 
 static unsigned char* g_base;
@@ -139,61 +116,23 @@ static bool hooked_eval(void* self, int condition, void* cat) {
 
 // ------------------------------------------------------------------- install --
 
-// The evaluator's prologue is three register spills - 15 bytes - so a 12-byte
-// absolute jump lands on an instruction boundary with three bytes to spare.
+// Three register spills - 15 bytes, position independent, and inside the 24
+// bytes the signature verifies.
 #define STOLEN 15
-
-static bool verify_sites() {
-    bool ok = true;
-    for (int i = 0; i < SITE_COUNT; i++) {
-        unsigned char* p = g_base + SITES[i].rva;
-        if (memcmp(p, SITES[i].sig, SITE_SIGLEN) != 0) {
-            logf_("mewbutch: %s at +%#x does not match - refusing to install",
-                  SITES[i].name, SITES[i].rva);
-            ok = false;
-        }
-        g_at[i] = p;
-    }
-    return ok;
-}
-
-static void write_abs_jmp(unsigned char* at, void* dest) {
-    at[0] = 0x48; at[1] = 0xB8;                       // mov rax, imm64
-    memcpy(at + 2, &dest, 8);
-    at[10] = 0xFF; at[11] = 0xE0;                     // jmp rax
-}
-
-static bool install() {
-    unsigned char* site = g_at[S_EVAL];
-
-    unsigned char* tramp = (unsigned char*)VirtualAlloc(
-        NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) { logf_("mewbutch: VirtualAlloc failed"); return false; }
-
-    memcpy(tramp, site, STOLEN);
-    write_abs_jmp(tramp + STOLEN, site + STOLEN);
-    g_orig_eval = (EvalFn)tramp;
-
-    DWORD old;
-    if (!VirtualProtect(site, STOLEN, PAGE_EXECUTE_READWRITE, &old)) {
-        logf_("mewbutch: VirtualProtect failed (%lu)", GetLastError());
-        return false;
-    }
-    write_abs_jmp(site, (void*)&hooked_eval);
-    for (int i = 12; i < STOLEN; i++) site[i] = 0x90;
-    VirtualProtect(site, STOLEN, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), site, STOLEN);
-    return true;
-}
 
 BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(mod);
 
     g_base = (unsigned char*)GetModuleHandleA(NULL);
-    logf_("mewbutch: base %p", g_base);
-    if (!verify_sites()) return TRUE;                 // leave the game alone
-    if (!install())      return TRUE;
+    int bad = verify_sites(SITES, SITE_COUNT, SITE_SIGLEN, g_base, g_at);
+    if (bad >= 0) {
+        logf_("mewbutch: %s at +%#x does not match - not installing",
+              SITES[bad].name, SITES[bad].rva);
+        return TRUE;                                  // leave the game alone
+    }
+    g_orig_eval = (EvalFn)install_detour(g_at[S_EVAL], STOLEN, (const void*)&hooked_eval);
+    if (!g_orig_eval) { logf_("mewbutch: could not install the detour"); return TRUE; }
     logf_("mewbutch: a harder run now excuses a lower act");
     return TRUE;
 }

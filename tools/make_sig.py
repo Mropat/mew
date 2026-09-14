@@ -13,7 +13,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from find_gate import PE, DEFAULT_EXE
 
-N = 16
+N = 24     # must cover the longest prologue any mod steals
 
 MODS = {
     "mewlinks": [

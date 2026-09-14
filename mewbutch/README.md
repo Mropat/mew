@@ -69,7 +69,7 @@ checked. Tag `mewbutch-v1.1.0` has that version if you want to compare.
   Regenerate with `tools/make_sig.py mewbutch` after a game update.
 - The 15 stolen bytes are three register spills, so nothing position-dependent
   moves and the game's own unwind info still describes the frame.
-- Writes `mewbutch.log` beside the game exe. Build with `/DMEWBUTCH_TRACE` to
+- Writes `mod_logs/mewbutch.log`. Build with `/DMEWBUTCH_TRACE` to
   also log every cat the mod accepts on Butch's behalf.
 - Nothing is written to your save. This only changes an acceptance test, so the
   failure mode is a donation being refused - no persisted state, no save

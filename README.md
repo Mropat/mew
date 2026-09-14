@@ -11,3 +11,14 @@ Mewgenics mods. One folder per mod; each builds to its own DLL.
 
 Releases are built by GitHub Actions, so every published DLL is traceable to a
 commit and a public build log.
+
+## Layout
+
+```
+common/    shared detour + logging, used by the mods that hook game functions
+tools/     find_gate.py, build_index.py, make_sig.py
+<mod>/     one folder per mod, each building to its own DLL
+```
+
+Every mod logs to `Mewgenics/mod_logs/<mod>.log`, alongside mewjector's own
+chainloader log, rather than dropping files beside the game exe.

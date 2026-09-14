@@ -109,7 +109,7 @@ clang++ -O2 -o test_abi.exe test_abi.cpp && ./test_abi.exe
 
 `sites.inc` pins seven call targets by RVA plus the first 16 bytes found there.
 A single mismatch aborts the whole install: the hook is never written, the game
-runs unmodified, and `mewlinks.log` names the site that moved. Regenerate it
+runs unmodified, and `mod_logs/mewlinks.log` names the site that moved. Regenerate it
 against a new build with `tools/make_sig.py`.
 
 | site | what it is |
