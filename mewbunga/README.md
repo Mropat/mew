@@ -48,8 +48,9 @@ Everything is gated on being in the ice age - Lord Bunga's zone - and on the
 game having the **boss** layer up, so an ordinary skirmish in the zone is left
 alone and no other zone is touched at all.
 
-Inside that fight, the radio version is parked in the **event** layer, which no
-fight ever uses, and crossfaded to on the turns of cats that qualify.
+Inside that fight, the radio version plays on **a fifth layer of its own**,
+crossfaded to on the turns of cats that qualify. Nothing is borrowed: the
+zone's own four layers are untouched, so event encounters keep their music.
 
 The radio version is not a stem - it is a separate performance, 203.0507s to
 the instrumental's 194.2857s, and the two never correlate as waveforms. But
@@ -67,6 +68,36 @@ and a switch lands on the same bar and the same beat. There is no seek to call,
 so the trimming is done by decoding and discarding inside the stream's own
 pull - a few blocks per call, since 2.9s of vorbis decode in one go would miss
 an audio deadline.
+
+Two corrections keep it honest. Our layer joins a frame or two after the set is
+built, and each stream counts the samples it has produced at `+0x1a0`, so the
+difference between the boss layer's count and ours is exactly that lateness -
+folded into the skip. And a decode block is a whole second, so the skip can
+only land on a second boundary: aiming at the nearest one rather than the next
+leaves about 100ms either way instead of always running ahead.
+
+## Adding a layer
+
+A zone has four layers because the parser reads four key names. `AddLayer`
+(`0xa1a580`) will happily build a fifth - it grows the vector and tail-calls
+`InitStream` - but a layer built that way is complete and permanently silent:
+stream, voice, chunk, audio core, and nothing ever decodes for it.
+
+What is missing is the rest of what the set builder does per layer, at
+`0xa1abba`:
+
+| | |
+| --- | --- |
+| `0xb51520` | spawn the stream's decode task (a thread per stream) |
+| `0xd80b60` | play its voice |
+
+`0xb51670` looks like the start call and is not - it only resumes a stream that
+already has a task decoding for it.
+
+The layer is built as `[intro, radio]`, mirroring the game's own `[intro,
+track]`. Every layer of a set consumes the zone's intro sting before its body
+begins, which is exactly why the four stay sample-aligned; a layer without one
+starts its body about six seconds early and is out of step all fight.
 
 ## When it switches
 

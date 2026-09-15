@@ -6,7 +6,7 @@
 #define GAME_TIMESTAMP   0x6a9c51e5u
 #define GAME_SIZEOFIMAGE 0x01574000u
 
-#define SITE_COUNT 10
+#define SITE_COUNT 13
 #define SITE_SIGLEN 24
 
 static const Site SITES[SITE_COUNT] = {
@@ -42,6 +42,15 @@ static const Site SITES[SITE_COUNT] = {
     // Layer::InitStream - hooked only to catch the AudioCore pointer that
     // AddLayer needs, and to notice when a new layer set is being built.
     { "LAYER_INIT", 0xa1a1d0u, { 0x48, 0x89, 0x5c, 0x24, 0x08, 0x4c, 0x89, 0x4c, 0x24, 0x20, 0x4c, 0x89, 0x44, 0x24, 0x18, 0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x56, 0x57, 0x41 } },
+    // SoundStream start/pause(stream, bool). The game runs a pass over every
+    // layer calling this when it builds a set - which is before our layer
+    // exists, so ours is complete but was never told to play.
+    { "STREAM_START", 0xb51670u, { 0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0xd9, 0x48, 0x8b, 0x09, 0x48, 0x85, 0xc9, 0x74, 0x0b, 0x44, 0x0f, 0xb6, 0xc2, 0x33, 0xd2, 0xe8 } },
+    // The two calls the set builder makes per layer after AddLayer, at
+    // 0xa1abc6 and 0xa1abdb: spawn the stream's decode task, then play its
+    // voice. A layer that has had neither is complete and silent forever.
+    { "STREAM_SPAWN", 0xb51520u, { 0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x55, 0x57, 0x41, 0x56, 0x48, 0x8b, 0xec, 0x48, 0x83, 0xec, 0x70, 0x48, 0x8b, 0xf1 } },
+    { "VOICE_PLAY",   0xd80b60u, { 0x48, 0x83, 0xec, 0x28, 0x45, 0x85, 0xc0, 0x74, 0x15, 0x48, 0x8b, 0x01, 0x80, 0x78, 0x01, 0x00, 0x74, 0x0c, 0xe8, 0x49, 0x94, 0x00, 0x00, 0x33 } },
     // Character::EndTurn() and Character::Die(bool, vec*, bool). Hooked only to
     // stop reading a character pointer once it can no longer be trusted: the
     // acting cat's INT is re-read every frame so a mid-turn change is heard at
@@ -60,6 +69,9 @@ static const Site SITES[SITE_COUNT] = {
 #define S_DECODER_REWIND 4
 #define S_ADD_LAYER      5
 #define S_LAYER_INIT     6
-#define S_ENDTURN        7
-#define S_DIE            8
-#define S_BEGINTURN      9
+#define S_STREAM_START   7
+#define S_STREAM_SPAWN   8
+#define S_VOICE_PLAY     9
+#define S_ENDTURN       10
+#define S_DIE           11
+#define S_BEGINTURN     12
