@@ -538,7 +538,12 @@ static void hooked_queue(void* self, void* path, int onfinish) {
     if (p && ends_with(p, "_battle.ogg")) g_stream_battle = self;
     if (p && ends_with(p, "_boss.ogg"))   g_stream_boss   = self;
 
-    if (p && is_fight_track(p)) {            // the event layer carries the swap
+    // Only in Lord Bunga's zone. The set queues its battle and map tracks
+    // before its event track, so the zone is already known by the time this is
+    // reached. Without this the substitution was global: every zone's event
+    // layer carried the radio version, and an event anywhere in the run played
+    // it instead of that zone's own music.
+    if (p && g_in_iceage && is_fight_track(p)) {
         g_stream_radio = self;
         g_pos = 0; g_carry = 0; g_skip_left = 0;
         InterlockedExchange(&g_realign, 1);   // trim the count-in before it is heard

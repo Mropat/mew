@@ -87,8 +87,12 @@ enemy acts.
 they take turns too, and a LordBunga has `intelligence 5` like anything else.
 INT lives at `+0x5c8` and is the live, buffed value.
 
-A cat with INT at or below the threshold always gets it. Everyone else draws
-once, at `RADIO_CHANCE_PERCENT`. The draw mixes a per-launch seed with the
+A cat with INT at or below the threshold gets it. `RADIO_CHANCE_PERCENT` is 0,
+so that is the only way to trigger it - the legend's own condition and nothing
+else. Raising it gives every other cat a draw, which makes the joke fire in an
+ordinary run at the cost of no longer meaning anything.
+
+The draw mixes a per-launch seed with the
 character's address rather than running an RNG per turn, so a cat keeps its
 verdict for the whole fight - a coin flipped every turn makes the music flap
 and reads as a bug. Characters are new objects each battle, so the same cat
@@ -96,12 +100,9 @@ draws again next fight, and differently next launch.
 
 ## Known, and why it is not shippable yet
 
-- **`RADIO_CHANCE_PERCENT` is 0.** Set that way to test the legend's own
-  condition in isolation, so nothing but a cat at or below the INT threshold
-  can trigger it. At 0 the joke essentially never fires in a real run - put it
-  back to 50 before shipping.
 - **Ice age event encounters play the radio version**, because that is the
-  layer it borrows. Every slot costs something: `boss` is the one the actual
+  layer it borrows. Only that zone: the substitution is gated on it, as is
+  everything else. Every slot costs something: `boss` is the one the actual
   Bunga fight needs and `map` is the hallway music, so `event` is the least
   bad. Only the ice age is affected, since nothing outside that zone is touched.
 - **A layer of our own would cost nothing, and does not work yet.**
