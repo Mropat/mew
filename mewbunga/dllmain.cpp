@@ -1,0 +1,504 @@
+// mewbunga - the Lord Bunga radio-version joke.
+//
+// Community legend says a cat with 0 INT makes the Lord Bunga fight play the
+// radio version of its song, "Mom I Really Hate You". It does not, but the
+// track is real: audio/music/radio.gon maps every zone's instrumental to a
+// vocal radio counterpart and lists
+//
+//     mom_i_really_hate_you  //ice age
+//
+// while data/maps/iceage.gon puts Lord Bunga on the ice age boss node.
+//
+// The two are the same arrangement at the same tempo - both 164.10 BPM - and
+// their onset envelopes lock at a constant +2.902s across the whole track,
+// which is 7.94 beats: the radio version has a two-bar count-in. They are not
+// the same master recording, so they never correlate as waveforms, but they
+// play together perfectly once that offset is taken out. That is what the
+// layered version of this mod will need.
+//
+// THIS BUILD IS THE FIRST STEP AND IS DELIBERATELY BLUNT. It swaps the track
+// in EVERY fight, with no INT check, so the mechanism can be tested without
+// walking to the ice age boss every time. What it proves: that rewriting the
+// path at SoundStream::QueueSongChunk actually controls what the game plays.
+//
+// Not the finished joke. The finished one queues the radio song into an idle
+// layer slot and crossfades per character at BeginTurn, so the cat whose turn
+// it is decides what you hear.
+
+#include <windows.h>
+#include <cstdio>
+#include <cstdarg>
+#include <cstring>
+
+#define MOD_HOOK_PRIORITY 50
+#include "hookapi.inc"
+#include "sites.inc"
+
+#define RADIO_TRACK "audio/music/radio/songs/mom_i_really_hate_you.ogg"
+#define BUNGA_TRACK "audio/music/iceage/iceage_boss.ogg"
+
+// TEST BUILD SWITCH - not how the mod should ship.
+//
+// With this on, every other music layer in the adventure becomes the Lord
+// Bunga track, so the pairing you hear anywhere is the real one: the ice age
+// boss instrumental against its own vocal radio version. Off, the radio
+// version is crossfaded against whatever zone you happen to be in, which
+// sounds like two different songs because it is.
+//
+// It also makes the loop behaviour audible. The instrumental is 194.286s and
+// the radio version 203.051s, both looping independently, so they drift 8.765s
+// further apart every time round.
+#define MEWBUNGA_ALL_BUNGA 1
+
+// The radio version carries a two-bar count-in, so at any moment it is playing
+// content 2.902s earlier in the arrangement than the instrumental - which is
+// why a switch sounds a couple of bars out.
+//
+// Holding the instrumental layers back by that amount was tried and reverted.
+// It aligned them, but it assumed the stream would still be alive when the
+// held chunk came due - and crossing into the shop tears the music set down
+// and builds a new one. The chunks were released into streams that no longer
+// mattered, and the next fight had no music at all. The same shape of mistake
+// could have been a use-after-free rather than silence.
+//
+// The alignment still needs doing, but through the decoder's own position
+// rather than by second-guessing when the game wants a chunk queued.
+
+// Who gets the radio version.
+//
+// The legend's rule - 0 INT - is the one the mod is named for, but a 0 INT cat
+// is not something you can produce on demand, so it cannot be the only trigger
+// or the mod is untestable and almost never fires in a real run. Every other
+// cat gets a fixed draw instead: one cat in RADIO_CHANCE_IN_N hears it.
+//
+// The draw is deterministic per cat, not per turn. A cat that is a radio cat
+// stays one for the whole fight, because a coin flipped every turn would make
+// the music flap back and forth and read as a bug rather than a joke.
+#define RADIO_INT_THRESHOLD 0        // INT at or below this: always
+#define RADIO_CHANCE_PERCENT 50      // everyone else: this many percent
+
+// is_player_cat, a byte written by Character::init - it is the gon property
+// that is "true" in data/characters/player_cat.gon and "false" in enemies.gon
+// and finalboss.gon. Found at the store "mov byte ptr [r14+0x489], al" right
+// after init parses the literal "is_player_cat" at 0xf9fc5.
+//
+// Enemies and arena scenery take turns too, and they have stats like anything
+// else - a LordBunga has intelligence 5 - so without this the music would flip
+// on the boss's turn as readily as on yours.
+#define OFF_IS_PLAYER_CAT 0x489
+
+// Character stat block, from the buff applier at 0x7d610, which does
+// "add dword ptr [rdx+0x5bc], ecx" immediately after loading "strength":
+//   +0x5bc str  +0x5c0 dex  +0x5c4 con  +0x5c8 int  +0x5cc spd  +0x5d0 cha
+// The same function reads current HP at +0x4b0, which is where the combat
+// probe independently put it, so the block is anchored to something known.
+#define OFF_INT 0x5c8
+
+static unsigned char* g_base;
+static unsigned char* g_at[SITE_COUNT];
+static FILE*          g_log;
+static unsigned       g_swaps;
+
+typedef void (*QueueFn)(void* self, void* path, int onfinish);
+typedef void (*TurnFn)(void* self, int kind);
+static QueueFn g_next;
+static TurnFn  g_next_turn;
+
+static void say(const char* fmt, ...) {
+    if (!g_log) return;
+    va_list ap; va_start(ap, fmt);
+    vfprintf(g_log, fmt, ap); va_end(ap);
+    fputc(10, g_log); fflush(g_log);
+}
+
+// MSVC std::string: 16-byte SSO buffer, size at +0x10, capacity at +0x18.
+// Capacity over 15 means +0x00 holds a heap pointer instead of the characters.
+static const char* str_of(const void* s) {
+    if (!s) return 0;
+    const unsigned long long cap = *(const unsigned long long*)((const char*)s + 0x18);
+    return cap > 15 ? *(const char* const*)s : (const char*)s;
+}
+
+// A std::string we hand to the game, built with the game's own allocator.
+//
+// The first attempt pointed a hand-built string at a static literal and passed
+// that. It crashed with 0xC0000374 - heap corruption - inside ntdll with
+// QueueSongChunk on the stack: something in there frees the string's buffer,
+// and a static literal is not the game's to free. Nor would our own malloc
+// have been, since this DLL's CRT heap is not the game's.
+//
+// std::string::append grows through the game's own allocator, which makes the
+// result safe for it to free, move or keep. A fresh object every call, never
+// reused: if the game does take ownership, reusing one would mean appending
+// into a freed pointer the second time round.
+struct alignas(16) GameString {
+    char               buf[16];
+    unsigned long long size;
+    unsigned long long cap;
+};
+static_assert(sizeof(GameString) == 32, "std::string is 0x20 bytes");
+
+typedef void* (*AppendFn)(void* self, const char* s, unsigned long long n);
+static AppendFn g_append;
+
+static void make_game_string(GameString* out, const char* lit, unsigned long long n) {
+    for (unsigned i = 0; i < sizeof(*out); i++) ((char*)out)[i] = 0;
+    out->cap = 15;                       // the empty short-string state
+    g_append(out, lit, n);
+}
+
+// splitmix64, so the draw is spread evenly over pointers that differ only in
+// their low bits - characters in one battle are allocated close together, and
+// a plain modulo of the address would put whole runs of them on the same side.
+static unsigned long long mix64(unsigned long long x) {
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+
+// Randomised once per launch, so the draw is genuinely unpredictable rather
+// than a fixed function of an address, and differs between playthroughs.
+static unsigned long long g_seed;
+
+static void seed_draw(void) {
+    LARGE_INTEGER qpc; QueryPerformanceCounter(&qpc);
+    g_seed = mix64((unsigned long long)qpc.QuadPart)
+           ^ mix64((unsigned long long)GetTickCount64())
+           ^ mix64((unsigned long long)GetCurrentProcessId());
+}
+
+// Mixing the session seed with the character's address rather than drawing
+// from a running RNG is deliberate: the answer has to be the same every time
+// it is asked for a given cat. A fresh draw per turn would make the music flap
+// back and forth mid-fight and read as a bug rather than a joke. Characters
+// are new objects each battle, so the same cat draws again next fight, and
+// differently next launch.
+static bool is_radio_cat(void* self) {
+    if (!self) return false;
+    if (!*(const unsigned char*)((const char*)self + OFF_IS_PLAYER_CAT)) return false;
+    const int intel = *(const int*)((const char*)self + OFF_INT);
+    if (intel <= RADIO_INT_THRESHOLD) return true;
+    return (mix64((unsigned long long)self ^ g_seed) % 100) < RADIO_CHANCE_PERCENT;
+}
+
+// Where the layer set lives.
+//
+// Layers are held in a std::vector<Layer> with a 0x30 stride, reached through
+// the component's layer group: begin at group+0x00, end at group+0x08. Read
+// fresh every frame rather than cached - a vector that grows moves its
+// elements, and a cached Layer pointer becomes freed memory.
+#define LAYER_STRIDE   0x30
+#define OFF_GAIN_CUR   0x20      // current gain: ramped toward the target
+#define OFF_GAIN_TGT   0x28      // target gain: 1.0 audible, 0.0 silent
+#define LAYER_BATTLE   0         // queue order: battle, map, event, boss
+#define LAYER_BOSS     3
+
+// Which fight layer the current cat should hear, or -1 for "do not interfere".
+static volatile int g_want = -1;
+
+// Force the choice every frame, after the game has updated.
+//
+// Writing the gains once at BeginTurn was not enough: the music switched for
+// about a second and then slid back. The ramp at 0xa1a7e0 only moves current
+// toward target, so it was not the culprit - something re-set the TARGET, and
+// finding what was more work than simply having the last word. Setting the
+// target after the game's own update each frame does that, and setting only
+// the target (never current) leaves the crossfade to the game, so the switch
+// fades the way its own transitions do.
+//
+// The override is deliberately self-limiting. It only ever redirects a choice
+// the game has ALREADY made between the two fight layers: if the game wants
+// neither - in the hallway, on the map, during an event - both targets are
+// zero, and this leaves them alone. So it can change which fight music plays
+// but can never start music the game did not ask for.
+// The streams, so layers can be identified by what they play rather than by a
+// guessed index. The queue order happens to be battle, map, event, boss - but
+// that is an observation about two zones, not a promise, and a set with a
+// missing slot would shift it. Matching on the stream pointer cannot drift.
+static void* volatile g_stream_radio;    // the event layer: holds the swap
+static void* volatile g_stream_battle;
+static void* volatile g_stream_boss;
+
+// How long a switch takes, in milliseconds. The game's own transitions glide
+// over roughly a second, so this is in the same register.
+#define FADE_MS 900.0
+
+// Our own fade envelope: 0 = the game's music, 1 = the radio version.
+//
+// Nudging the gain by a fixed amount per frame fought the game's ramp pulling
+// the same value the other way, and gave a fade-in that was quick and uneven
+// while the fade-out - performed by the game once we stopped writing - sounded
+// right. Assigning an envelope we compute ourselves settles it: the shape and
+// duration are ours, and the game's ramp cannot argue. Timed off the clock, so
+// it lasts the same wall-clock time at any frame rate.
+static double        g_mix;
+static unsigned long g_mix_tick;
+extern long long     g_pos;   // defined with the stem state below
+
+static void force_layers(unsigned char* group, int which) {
+    unsigned char* begin = *(unsigned char**)(group + 0x00);
+    unsigned char* end   = *(unsigned char**)(group + 0x08);
+    if (!begin || !end || end <= begin) return;
+    const size_t count = (size_t)(end - begin) / LAYER_STRIDE;
+    if (count < 2 || count > 8) return;
+
+    int radio = -1, battle = -1, boss = -1;
+    for (size_t i = 0; i < count; i++) {
+        void* st = *(void**)(begin + i * LAYER_STRIDE);
+        if (st && st == g_stream_radio)  radio  = (int)i;
+        if (st && st == g_stream_battle) battle = (int)i;
+        if (st && st == g_stream_boss)   boss   = (int)i;
+    }
+    if (radio < 0) return;               // not the set we swapped into
+
+    double* t_bat = battle >= 0 ? (double*)(begin + battle * LAYER_STRIDE + OFF_GAIN_TGT) : 0;
+    double* t_bos = boss   >= 0 ? (double*)(begin + boss   * LAYER_STRIDE + OFF_GAIN_TGT) : 0;
+    const bool fighting = (t_bat && *t_bat > 0.0) || (t_bos && *t_bos > 0.0);
+
+    const unsigned long now = GetTickCount();
+    const double dt = g_mix_tick ? (double)(now - g_mix_tick) : 0.0;
+    g_mix_tick = now;
+    const double want = (fighting && g_want == LAYER_BOSS) ? 1.0 : 0.0;
+    if (dt > 0.0 && dt < 500.0) {        // ignore a hitch or a loading pause
+        const double step = dt / FADE_MS;
+        if (g_mix < want) { g_mix += step; if (g_mix > want) g_mix = want; }
+        else if (g_mix > want) { g_mix -= step; if (g_mix < want) g_mix = want; }
+    }
+    if (g_mix <= 0.0) return;            // released: the game's own gains stand
+
+    // Assign, do not nudge. Only the fight layer the game actually has up is
+    // damped - raising the other one would put two layers on at once.
+    *(double*)(begin + radio * LAYER_STRIDE + OFF_GAIN_CUR) = g_mix;
+    if (t_bat && *t_bat > 0.0)
+        *(double*)(begin + battle * LAYER_STRIDE + OFF_GAIN_CUR) = 1.0 - g_mix;
+    if (t_bos && *t_bos > 0.0)
+        *(double*)(begin + boss * LAYER_STRIDE + OFF_GAIN_CUR) = 1.0 - g_mix;
+
+    static unsigned long s_last;
+    if ((now - s_last) > 3000) {
+        s_last = now;
+        say("layers[%d]: radio=%d battle=%d boss=%d fighting=%d mix=%.2f pos=%.1fs",
+            which, radio, battle, boss, (int)fighting, g_mix,
+            (double)g_pos / 44100.0);
+    }
+}
+
+// Trim the radio version into a stem of the Bunga theme.
+//
+// Measured from the two files: the instrumental is exactly 8,568,000 samples
+// (194.2857s) and the radio version 8,954,535. The radio carries a two-bar
+// count-in of 127,808 samples - 7.93 beats at their shared 164.10 BPM,
+// measured by correlating onset envelopes at 64-sample resolution - and a
+// four-bar tail of 258,727 samples afterwards.
+//
+// Discard both and what remains is the same body, the same length as the
+// instrumental. Loop it on the INSTRUMENTAL's length rather than its own and
+// the two stay locked together indefinitely, so a switch lands on the same bar
+// and the same beat.
+//
+// This replaces restarting the track at each switch. Restarting was consistent
+// but it always entered at the top of the song, no matter where the fight's
+// music had got to. Looping it as a stem means it is simply always in the
+// right place, and nothing needs to happen at the moment of the switch at all.
+#define SKIP_SAMPLES   127808          // the two-bar count-in
+#define BODY_SAMPLES   8568000         // the instrumental's exact length
+#define SKIP_PER_PULL  8               // blocks discarded per call, to spread the work
+
+static long          g_skip_left;      // samples still to discard
+long long            g_pos;            // samples of body played since alignment
+static volatile long g_realign;        // rewind and re-trim at the next pull
+static long long     g_carry;          // overshoot past the loop point, preserved
+
+typedef void (*PullFn)(void* self, void* out);
+typedef void (*RewindFn)(void* decoder);
+static PullFn   g_next_pull;
+static RewindFn g_rewind;
+
+static void hooked_pull(void* self, void* out) {
+    const bool ours = self && self == g_stream_radio;
+
+    if (ours && InterlockedExchange(&g_realign, 0)) {
+        // Chunk layout read out of the pull itself: the chunk vector is at
+        // stream+0x170 with a 0x10 stride, the live index at stream+0x188, and
+        // the decoder is the first field of the chunk.
+        unsigned char* vec = *(unsigned char**)((unsigned char*)self + 0x170);
+        const int idx = *(const int*)((unsigned char*)self + 0x188);
+        if (vec && idx >= 0 && idx < 64) {
+            void* decoder = *(void**)(vec + (size_t)idx * 0x10);
+            if (decoder && g_rewind) {
+                g_rewind(decoder);
+                // Carry the overshoot into the skip so the loop point stays
+                // exact instead of slipping by up to a block every lap.
+                g_skip_left = (long)(SKIP_SAMPLES + g_carry);
+                g_pos = 0; g_carry = 0;
+            }
+        }
+    }
+
+    // Discard, a few blocks at a time. There is no seek to call, so skipping
+    // means decoding and throwing away - and 2.9s of vorbis decode inside one
+    // call is a good way to miss an audio deadline. Each call overwrites the
+    // same output block, so nothing discarded here reaches the mixer.
+    if (ours && g_skip_left > 0) {
+        for (int i = 0; i < SKIP_PER_PULL && g_skip_left > 0; i++) {
+            g_next_pull(self, out);
+            const int got = *(const int*)((const unsigned char*)out + 8);
+            if (got <= 0) { g_skip_left = 0; break; }   // chunk ended: stop
+            g_skip_left -= got;
+        }
+    }
+
+    g_next_pull(self, out);
+
+    if (ours && g_skip_left <= 0) {
+        const int got = *(const int*)((const unsigned char*)out + 8);
+        if (got > 0) {
+            g_pos += got;
+            if (g_pos >= BODY_SAMPLES) {            // end of the body: loop it
+                g_carry = g_pos - BODY_SAMPLES;
+                InterlockedExchange(&g_realign, 1);
+            }
+        }
+    }
+}
+
+typedef void (*UpdateFn)(void* self);
+static UpdateFn g_next_update;
+
+static void hooked_update(void* self) {
+    g_next_update(self);
+    if (self) {
+        force_layers((unsigned char*)self + 0x50, 0);
+        force_layers((unsigned char*)self + 0x78, 1);
+    }
+}
+
+static bool ends_with(const char* s, const char* suffix) {
+    const size_t n = strlen(s), m = strlen(suffix);
+    return n >= m && memcmp(s + n - m, suffix, m) == 0;
+}
+
+// The radio version goes in the EVENT layer.
+//
+// All four layers of a zone - map, battle, event, boss - stream in parallel
+// from the moment the level loads, and the game crossfades between them. One
+// of them can be borrowed to carry the radio version at no cost, as long as
+// it is one no fight ever uses.
+//
+// The boss slot was the obvious choice and the wrong one: this is a mod about
+// a boss fight, and in the real Lord Bunga fight the game wants that slot, so
+// borrowing it leaves no vanilla boss music to switch back to. Event is idle
+// in ordinary fights AND in boss fights, so it works for both.
+//
+// The cost, and it is a real one: music for event encounters becomes the radio
+// version, since that layer now holds it whenever the game chooses event on
+// its own. Every slot has some such cost - map is the hallway music, which
+// would be worse - and event is the one heard least during the joke.
+static bool is_fight_track(const char* p) {
+    return ends_with(p, "_event.ogg");
+}
+
+// The two tracks are the same arrangement at the same tempo - both 164.10 BPM,
+// with their onset envelopes locking at a constant +2.902s across the whole
+// track, which is 7.94 beats: the radio version carries a two-bar count-in.
+// They are not the same recording, so they never correlate as waveforms, but
+// they sit together properly once that offset is accounted for. Nothing here
+// accounts for it yet: both layers start when the level loads, so the radio
+// version runs two bars behind.
+static void queue_as(void* self, const char* track, unsigned long long len,
+                     void* path, int onfinish) {
+    GameString replacement;
+    make_game_string(&replacement, track, len);
+    say("swap %s -> %s", str_of(path), track);
+    g_swaps++;
+    g_next(self, &replacement, onfinish);
+}
+
+static void hooked_queue(void* self, void* path, int onfinish) {
+    const char* p = str_of(path);
+    if (p && ends_with(p, "_battle.ogg")) g_stream_battle = self;
+    if (p && ends_with(p, "_boss.ogg"))   g_stream_boss   = self;
+
+    if (p && is_fight_track(p)) {            // the event layer carries the swap
+        g_stream_radio = self;
+        g_pos = 0; g_carry = 0; g_skip_left = 0;
+        InterlockedExchange(&g_realign, 1);   // trim the count-in before it is heard
+        queue_as(self, RADIO_TRACK, sizeof(RADIO_TRACK) - 1, path, onfinish);
+        return;
+    }
+#if MEWBUNGA_ALL_BUNGA
+    if (p && (ends_with(p, "_map.ogg") || ends_with(p, "_battle.ogg")
+                                       || ends_with(p, "_boss.ogg"))) {
+        queue_as(self, BUNGA_TRACK, sizeof(BUNGA_TRACK) - 1, path, onfinish);
+        return;
+    }
+#endif
+    if (p) say("pass %s", p);
+    g_next(self, path, onfinish);
+}
+
+// Nothing switches yet - the layer machinery is still being mapped - so for now
+// this only reports what it WOULD do, once per cat per turn. That is enough to
+// see the rule behave in a real fight: the same cats should keep their verdict
+// all the way through, and roughly one in RADIO_CHANCE_IN_N of them should be
+// radio cats.
+static void hooked_turn(void* self, int kind) {
+    if (self) {
+        const int intel = *(const int*)((const char*)self + OFF_INT);
+        const bool player = *(const unsigned char*)((const char*)self + OFF_IS_PLAYER_CAT) != 0;
+        if (player) {
+            const bool radio = is_radio_cat(self);
+            g_want = radio ? LAYER_BOSS : LAYER_BATTLE;
+            say("turn: player cat=%p INT=%d -> %s", self, intel,
+                radio ? "RADIO" : "vanilla");
+        } else {
+            say("turn:   NPC  cat=%p INT=%d -> -", self, intel);
+        }
+    }
+    g_next_turn(self, kind);
+}
+
+BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
+    if (reason != DLL_PROCESS_ATTACH) return TRUE;
+    DisableThreadLibraryCalls(mod);
+    g_base = (unsigned char*)GetModuleHandleA(NULL);
+
+    char path[MAX_PATH];
+    if (GetModuleFileNameA(GetModuleHandleA(NULL), path, MAX_PATH)) {
+        char* slash = strrchr(path, (char)92);
+        if (slash) {
+            lstrcpyA(slash + 1, "mod_logs");
+            CreateDirectoryA(path, NULL);
+            lstrcatA(path, "\\mewbunga.log");
+            g_log = fopen(path, "w");
+        }
+    }
+
+    seed_draw();
+
+    hookapi_init();
+    const int bad = verify_sites_chained(SITES, SITE_COUNT, SITE_SIGLEN, g_base, g_at,
+                                         GAME_TIMESTAMP, GAME_SIZEOFIMAGE);
+    if (bad >= 0) {
+        say("mewbunga: site %s (rva 0x%x) does not match this build - not installing",
+            SITES[bad].name, SITES[bad].rva);
+        return TRUE;
+    }
+
+    g_append = (AppendFn)g_at[S_APPEND];
+
+    g_next = (QueueFn)install_hook(SITES[S_QUEUECHUNK].rva, g_at[S_QUEUECHUNK], 24,
+                                   (const void*)&hooked_queue, "mewbunga");
+    g_rewind   = (RewindFn)g_at[S_DECODER_REWIND];
+    g_next_pull = (PullFn)install_hook(SITES[S_STREAM_PULL].rva, g_at[S_STREAM_PULL], 24,
+                                       (const void*)&hooked_pull, "mewbunga");
+    g_next_update = (UpdateFn)install_hook(SITES[S_MLMP_UPDATE].rva, g_at[S_MLMP_UPDATE], 24,
+                                           (const void*)&hooked_update, "mewbunga");
+    g_next_turn = (TurnFn)install_hook(SITES[S_BEGINTURN].rva, g_at[S_BEGINTURN], 24,
+                                       (const void*)&hooked_turn, "mewbunga");
+    say("mewbunga: queue=%s turn=%s  update=%s  (player cats: INT<=%d always, else %d%%)",
+        g_next ? "hooked" : "FAILED", g_next_turn ? "hooked" : "FAILED",
+        g_next_update ? "hooked" : "FAILED", RADIO_INT_THRESHOLD, RADIO_CHANCE_PERCENT);
+    return TRUE;
+}
