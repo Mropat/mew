@@ -48,7 +48,22 @@
 // It also makes the loop behaviour audible. The instrumental is 194.286s and
 // the radio version 203.051s, both looping independently, so they drift 8.765s
 // further apart every time round.
-#define MEWBUNGA_ALL_BUNGA 1
+#define MEWBUNGA_ALL_BUNGA 0
+
+// Which layer carries the radio version.
+//
+// 1 = a fifth layer of our own, added through the game's AddLayer. Cleanest in
+//     principle - it steals nothing - but currently INERT: the layer and its
+//     stream are created and the chunk is queued, yet the mixer never pulls it
+//     (pulls=0 while other streams pull fine). SoundStream's constructor
+//     leaves [stream+0] null and the gain loop skips any layer whose stream
+//     has it null, so something still has to start playback, and that call has
+//     not been found yet.
+//
+// 0 = borrow the event layer, which works. It costs the ice age's event
+//     encounter music, and nothing else: every part of this mod is gated on
+//     being in Lord Bunga's zone, so no other zone is touched at all.
+#define MEWBUNGA_OWN_LAYER 0
 
 // The radio version carries a two-bar count-in, so at any moment it is playing
 // content 2.902s earlier in the arrangement than the instrumental - which is
@@ -75,7 +90,15 @@
 // stays one for the whole fight, because a coin flipped every turn would make
 // the music flap back and forth and read as a bug rather than a joke.
 #define RADIO_INT_THRESHOLD 0        // INT at or below this: always
-#define RADIO_CHANCE_PERCENT 50      // everyone else: this many percent
+#define RADIO_CHANCE_PERCENT 0       // everyone else: this many percent
+                                     //
+                                     // 0 while the legend's own condition is
+                                     // being tested, so the only cat that can
+                                     // trigger it is one at or below the INT
+                                     // threshold - nothing else can muddy the
+                                     // result. Put it back to 50 afterwards,
+                                     // or the joke almost never fires in a
+                                     // real run.
 
 // is_player_cat, a byte written by Character::init - it is the gon property
 // that is "true" in data/characters/player_cat.gon and "false" in enemies.gon
@@ -188,6 +211,11 @@ static bool is_radio_cat(void* self) {
 // the component's layer group: begin at group+0x00, end at group+0x08. Read
 // fresh every frame rather than cached - a vector that grows moves its
 // elements, and a cached Layer pointer becomes freed memory.
+// The zone whose music is currently loaded. The joke belongs to one fight, so
+// everything is gated on being in the ice age - Lord Bunga's zone, and the one
+// the radio version is the counterpart of.
+static volatile long g_in_iceage;
+
 #define LAYER_STRIDE   0x30
 #define OFF_GAIN_CUR   0x20      // current gain: ramped toward the target
 #define OFF_GAIN_TGT   0x28      // target gain: 1.0 audible, 0.0 silent
@@ -196,6 +224,17 @@ static bool is_radio_cat(void* self) {
 
 // Which fight layer the current cat should hear, or -1 for "do not interfere".
 static volatile int g_want = -1;
+
+// The cat currently taking its turn, or null when there is nobody to ask.
+//
+// Its INT is re-read every frame rather than once at BeginTurn, so a cat that
+// makes itself stupid DURING its own turn hears the music change immediately
+// instead of on its next turn.
+//
+// The pointer is only ever read between BeginTurn and EndTurn, and is dropped
+// the moment the cat dies. That window is the whole reason this is safe: a
+// character freed mid-fight would otherwise be read every frame forever.
+static void* volatile g_acting;
 
 // Force the choice every frame, after the game has updated.
 //
@@ -234,6 +273,12 @@ static void* volatile g_stream_boss;
 // it lasts the same wall-clock time at any frame rate.
 static double        g_mix;
 static unsigned long g_mix_tick;
+
+// Defined with the stem state below; declared here because the gain override
+// refuses to act unless the stem is demonstrably producing audio.
+extern volatile long g_pulls;
+extern volatile long g_pulls_any;
+extern long          g_skip_left;
 extern long long     g_pos;   // defined with the stem state below
 
 static void force_layers(unsigned char* group, int which) {
@@ -243,22 +288,40 @@ static void force_layers(unsigned char* group, int which) {
     const size_t count = (size_t)(end - begin) / LAYER_STRIDE;
     if (count < 2 || count > 8) return;
 
-    int radio = -1, battle = -1, boss = -1;
+    int radio = -1, boss = -1;
     for (size_t i = 0; i < count; i++) {
         void* st = *(void**)(begin + i * LAYER_STRIDE);
         if (st && st == g_stream_radio)  radio  = (int)i;
-        if (st && st == g_stream_battle) battle = (int)i;
         if (st && st == g_stream_boss)   boss   = (int)i;
     }
     if (radio < 0) return;               // not the set we swapped into
 
-    double* t_bat = battle >= 0 ? (double*)(begin + battle * LAYER_STRIDE + OFF_GAIN_TGT) : 0;
-    double* t_bos = boss   >= 0 ? (double*)(begin + boss   * LAYER_STRIDE + OFF_GAIN_TGT) : 0;
-    const bool fighting = (t_bat && *t_bat > 0.0) || (t_bos && *t_bos > 0.0);
+    // Only the boss layer. The legend is about the Lord Bunga fight, not about
+    // ice age skirmishes, so an ordinary battle in the zone is left alone.
+    double* t_bos = boss >= 0 ? (double*)(begin + boss * LAYER_STRIDE + OFF_GAIN_TGT) : 0;
+    const bool fighting = g_in_iceage && t_bos && *t_bos > 0.0;
 
     const unsigned long now = GetTickCount();
+
+    // Reported before the early returns, not after them. The previous version
+    // sat at the end of the function and so could only print in the one case
+    // that needed no explaining.
+    static unsigned long s_last;
+    if ((now - s_last) > 3000) {
+        s_last = now;
+        say("layers[%d]: radio=%d boss=%d fighting=%d mix=%.2f pos=%.1fs pulls=%ld/%ld skip=%ld want=%d",
+            which, radio, boss, (int)fighting, g_mix,
+            (double)g_pos / 44100.0, g_pulls, g_pulls_any, g_skip_left, g_want);
+    }
+
     const double dt = g_mix_tick ? (double)(now - g_mix_tick) : 0.0;
     g_mix_tick = now;
+    // Ask the acting cat again, every frame. This is what makes a mid-turn
+    // change audible at once; between turns there is nobody to ask and the
+    // last verdict stands, so the music does not flap on enemy turns.
+    void* acting = g_acting;
+    if (acting) g_want = is_radio_cat(acting) ? LAYER_BOSS : LAYER_BATTLE;
+
     const double want = (fighting && g_want == LAYER_BOSS) ? 1.0 : 0.0;
     if (dt > 0.0 && dt < 500.0) {        // ignore a hitch or a loading pause
         const double step = dt / FADE_MS;
@@ -267,21 +330,21 @@ static void force_layers(unsigned char* group, int which) {
     }
     if (g_mix <= 0.0) return;            // released: the game's own gains stand
 
+    // Never silence the game's music in favour of a layer that is not actually
+    // producing audio. Entering the Bunga room once did exactly that - our
+    // stem was added and faded up while decoding nothing, and the fight played
+    // with ambience only. If the stem is not alive, this does nothing at all.
+    if (MEWBUNGA_OWN_LAYER && g_pulls <= 0) {
+        *(double*)(begin + radio * LAYER_STRIDE + OFF_GAIN_CUR) = 0.0;
+        return;
+    }
+
     // Assign, do not nudge. Only the fight layer the game actually has up is
     // damped - raising the other one would put two layers on at once.
     *(double*)(begin + radio * LAYER_STRIDE + OFF_GAIN_CUR) = g_mix;
-    if (t_bat && *t_bat > 0.0)
-        *(double*)(begin + battle * LAYER_STRIDE + OFF_GAIN_CUR) = 1.0 - g_mix;
     if (t_bos && *t_bos > 0.0)
         *(double*)(begin + boss * LAYER_STRIDE + OFF_GAIN_CUR) = 1.0 - g_mix;
 
-    static unsigned long s_last;
-    if ((now - s_last) > 3000) {
-        s_last = now;
-        say("layers[%d]: radio=%d battle=%d boss=%d fighting=%d mix=%.2f pos=%.1fs",
-            which, radio, battle, boss, (int)fighting, g_mix,
-            (double)g_pos / 44100.0);
-    }
 }
 
 // Trim the radio version into a stem of the Bunga theme.
@@ -305,7 +368,9 @@ static void force_layers(unsigned char* group, int which) {
 #define BODY_SAMPLES   8568000         // the instrumental's exact length
 #define SKIP_PER_PULL  8               // blocks discarded per call, to spread the work
 
-static long          g_skip_left;      // samples still to discard
+volatile long        g_pulls;          // blocks our stem has actually produced
+volatile long        g_pulls_any;      // blocks ANY stream has produced through this hook
+long                 g_skip_left;      // samples still to discard
 long long            g_pos;            // samples of body played since alignment
 static volatile long g_realign;        // rewind and re-trim at the next pull
 static long long     g_carry;          // overshoot past the loop point, preserved
@@ -317,6 +382,7 @@ static RewindFn g_rewind;
 
 static void hooked_pull(void* self, void* out) {
     const bool ours = self && self == g_stream_radio;
+    InterlockedIncrement(&g_pulls_any);   // is this hook on the decode path at all?
 
     if (ours && InterlockedExchange(&g_realign, 0)) {
         // Chunk layout read out of the pull itself: the chunk vector is at
@@ -347,6 +413,10 @@ static void hooked_pull(void* self, void* out) {
             if (got <= 0) { g_skip_left = 0; break; }   // chunk ended: stop
             g_skip_left -= got;
         }
+        // Blocks are whole, so the last one always overshoots. Those samples
+        // are already part of the body, so count them - otherwise the loop
+        // period runs long by up to a block every lap.
+        if (g_skip_left < 0) { g_pos = -g_skip_left; g_skip_left = 0; }
     }
 
     g_next_pull(self, out);
@@ -354,6 +424,7 @@ static void hooked_pull(void* self, void* out) {
     if (ours && g_skip_left <= 0) {
         const int got = *(const int*)((const unsigned char*)out + 8);
         if (got > 0) {
+            InterlockedIncrement(&g_pulls);
             g_pos += got;
             if (g_pos >= BODY_SAMPLES) {            // end of the body: loop it
                 g_carry = g_pos - BODY_SAMPLES;
@@ -363,11 +434,41 @@ static void hooked_pull(void* self, void* out) {
     }
 }
 
+static void add_our_layer(unsigned char* group);
+
+// Stop trusting the acting pointer. EndTurn is the ordinary case; Die is the
+// one that matters, since a cat can be killed in the middle of its own turn.
+typedef void (*EndTurnFn)(void* self);
+typedef void (*DieFn)(void* self, bool a, void* b, bool c);
+static EndTurnFn g_next_endturn;
+static DieFn     g_next_die;
+
+static void hooked_endturn(void* self) {
+    if (self && self == g_acting) g_acting = 0;
+    g_next_endturn(self);
+}
+
+static void hooked_die(void* self, bool a, void* b, bool c) {
+    if (self && self == g_acting) g_acting = 0;
+    g_next_die(self, a, b, c);
+}
+
 typedef void (*UpdateFn)(void* self);
 static UpdateFn g_next_update;
 
 static void hooked_update(void* self) {
     g_next_update(self);
+    // Tried every frame rather than on a flag. A single global "a set was
+    // built" flag was consumed by whichever MultiLayerMusicPlayer updated
+    // first - the ambience or title player, not necessarily the one holding
+    // the zone's music - so the add never reached the right group. Checking
+    // whether our stream is already present makes retrying free and correct.
+#if MEWBUNGA_OWN_LAYER
+    if (self && g_in_iceage) {
+        add_our_layer((unsigned char*)self + 0x50);
+        add_our_layer((unsigned char*)self + 0x78);
+    }
+#endif
     if (self) {
         force_layers((unsigned char*)self + 0x50, 0);
         force_layers((unsigned char*)self + 0x78, 1);
@@ -396,7 +497,12 @@ static bool ends_with(const char* s, const char* suffix) {
 // its own. Every slot has some such cost - map is the hallway music, which
 // would be worse - and event is the one heard least during the joke.
 static bool is_fight_track(const char* p) {
-    return ends_with(p, "_event.ogg");
+#if MEWBUNGA_OWN_LAYER
+    (void)p;
+    return false;                        // we bring our own layer
+#else
+    return ends_with(p, "_event.ogg");   // borrow the one no fight uses
+#endif
 }
 
 // The two tracks are the same arrangement at the same tempo - both 164.10 BPM,
@@ -417,6 +523,18 @@ static void queue_as(void* self, const char* track, unsigned long long len,
 
 static void hooked_queue(void* self, void* path, int onfinish) {
     const char* p = str_of(path);
+    if (p && strcmp(p, RADIO_TRACK) == 0) {       // our own layer, starting up
+        g_stream_radio = self;
+        g_pos = 0; g_carry = 0; g_skip_left = 0;
+        InterlockedExchange(&g_realign, 1);        // trim the count-in first
+        say("our layer is streaming: %p", self);
+    }
+    // Which zone's music is loading. Every layer path is <zone>/<name>_kind.ogg,
+    // so the set that is being queued says where we are.
+    if (p && (ends_with(p, "_map.ogg") || ends_with(p, "_battle.ogg")
+           || ends_with(p, "_boss.ogg") || ends_with(p, "_event.ogg")))
+        InterlockedExchange(&g_in_iceage, strstr(p, "iceage/") ? 1 : 0);
+
     if (p && ends_with(p, "_battle.ogg")) g_stream_battle = self;
     if (p && ends_with(p, "_boss.ogg"))   g_stream_boss   = self;
 
@@ -449,6 +567,7 @@ static void hooked_turn(void* self, int kind) {
         const bool player = *(const unsigned char*)((const char*)self + OFF_IS_PLAYER_CAT) != 0;
         if (player) {
             const bool radio = is_radio_cat(self);
+            g_acting = self;
             g_want = radio ? LAYER_BOSS : LAYER_BATTLE;
             say("turn: player cat=%p INT=%d -> %s", self, intel,
                 radio ? "RADIO" : "vanilla");
@@ -457,6 +576,83 @@ static void hooked_turn(void* self, int kind) {
         }
     }
     g_next_turn(self, kind);
+}
+
+
+// A layer of our own.
+//
+// Earlier builds borrowed the event layer, because a zone only ever uses four
+// and event is the one no fight touches. It worked, but event encounters then
+// played the radio version, which is not the joke - and every other slot is
+// worse: boss is the one the actual Bunga fight needs, map is the hallway.
+//
+// The group can simply be told to hold five. AddLayer grows the vector and
+// initialises the element, which is exactly what the game does for its own
+// four, so the fifth is an ordinary layer that happens to be ours. The game's
+// selector never chooses it, which is the point: its gain is nobody's business
+// but this mod's.
+typedef void (*AddLayerFn)(void* group, void* core, int index,
+                           const void* paths, const void* finishes);
+static AddLayerFn g_add_layer;
+
+typedef void (*LayerInitFn)(void* self, void* core, void* paths, void* finishes);
+static LayerInitFn g_next_layer_init;
+static void* volatile g_core;            // AudioCore, captured from InitStream
+
+static void hooked_layer_init(void* self, void* core, void* paths, void* finishes) {
+    if (core) g_core = core;             // AddLayer needs it; only InitStream is handed one
+    g_next_layer_init(self, core, paths, finishes);
+}
+
+// std::vector is three pointers: begin, end, capacity-end. The callee only
+// reads them, and copies what it needs out, so these can point at our own
+// storage. The string itself is built through the game's allocator, because
+// anything downstream that copies or frees it must find a buffer it owns.
+struct Vec3 { const void* begin; const void* end; const void* cap; };
+
+static GameString  g_radio_path;
+static int         g_radio_finish = 2;   // what the game's own music layers use
+
+static void add_our_layer(unsigned char* group) {
+    // Say why, at most once a second, so a silent bail names itself instead of
+    // costing another round trip.
+    static unsigned long s_last;
+    const unsigned long now = GetTickCount();
+    const bool tell = (now - s_last) > 1000;
+    #define BAIL(...) do { if (tell) { s_last = now; say(__VA_ARGS__); } return; } while (0)
+
+    unsigned char* begin = *(unsigned char**)(group + 0x00);
+    unsigned char* end   = *(unsigned char**)(group + 0x08);
+    if (!begin || !end || end < begin) BAIL("add: empty group (begin=%p end=%p)", begin, end);
+    const size_t count = (size_t)(end - begin) / LAYER_STRIDE;
+    if (count < 2 || count > 8) BAIL("add: %zu layers, not a music set", count);
+
+    bool mine = false;
+    for (size_t i = 0; i < count; i++) {
+        void* st = *(void**)(begin + i * LAYER_STRIDE);
+        if (st && (st == g_stream_battle || st == g_stream_boss)) mine = true;
+        if (st && st == g_stream_radio) return;    // already added to this set
+    }
+    if (!mine) BAIL("add: %zu layers, none is battle(%p)/boss(%p)  [0]=%p",
+                    count, g_stream_battle, g_stream_boss, *(void**)begin);
+    if (!g_add_layer) BAIL("add: AddLayer address missing");
+
+    // The AudioCore argument is passed through and never used: InitStream
+    // stores it to shadow space at 0xa1a1df and reads it back nowhere, and
+    // AddLayer only forwards its own rdx. The game itself passes null here, so
+    // requiring one before adding a layer was blocking the whole feature over
+    // an argument that does not matter.
+
+    make_game_string(&g_radio_path, RADIO_TRACK, sizeof(RADIO_TRACK) - 1);
+    const Vec3 paths    = { &g_radio_path, &g_radio_path + 1, &g_radio_path + 1 };
+    const Vec3 finishes = { &g_radio_finish, &g_radio_finish + 1, &g_radio_finish + 1 };
+    // A new set is a new fight. Carrying the last one's verdict over meant the
+    // override engaged the moment the boss music started, before any cat had
+    // taken a turn.
+    g_want = -1; g_mix = 0.0; g_pulls = 0;
+    say("adding layer %zu for %s (group=%p)", count, RADIO_TRACK, group);
+    g_add_layer(group, g_core, (int)count, &paths, &finishes);
+    #undef BAIL
 }
 
 BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
@@ -490,11 +686,21 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
 
     g_next = (QueueFn)install_hook(SITES[S_QUEUECHUNK].rva, g_at[S_QUEUECHUNK], 24,
                                    (const void*)&hooked_queue, "mewbunga");
-    g_rewind   = (RewindFn)g_at[S_DECODER_REWIND];
+    g_rewind     = (RewindFn)g_at[S_DECODER_REWIND];
+    g_add_layer  = (AddLayerFn)g_at[S_ADD_LAYER];
+    // Only needed to capture the AudioCore for AddLayer, which the borrowed
+    // layer does not use - but the hook is harmless and keeps the two paths
+    // symmetrical.
+    g_next_layer_init = (LayerInitFn)install_hook(SITES[S_LAYER_INIT].rva, g_at[S_LAYER_INIT],
+                                       24, (const void*)&hooked_layer_init, "mewbunga");
     g_next_pull = (PullFn)install_hook(SITES[S_STREAM_PULL].rva, g_at[S_STREAM_PULL], 24,
                                        (const void*)&hooked_pull, "mewbunga");
     g_next_update = (UpdateFn)install_hook(SITES[S_MLMP_UPDATE].rva, g_at[S_MLMP_UPDATE], 24,
                                            (const void*)&hooked_update, "mewbunga");
+    g_next_endturn = (EndTurnFn)install_hook(SITES[S_ENDTURN].rva, g_at[S_ENDTURN], 24,
+                                             (const void*)&hooked_endturn, "mewbunga");
+    g_next_die     = (DieFn)install_hook(SITES[S_DIE].rva, g_at[S_DIE], 24,
+                                         (const void*)&hooked_die, "mewbunga");
     g_next_turn = (TurnFn)install_hook(SITES[S_BEGINTURN].rva, g_at[S_BEGINTURN], 24,
                                        (const void*)&hooked_turn, "mewbunga");
     say("mewbunga: queue=%s turn=%s  update=%s  (player cats: INT<=%d always, else %d%%)",

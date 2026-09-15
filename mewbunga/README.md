@@ -44,8 +44,12 @@ multiplies it by the master to set the stream's volume.
 
 ## What this mod does
 
-Parks the radio version in the **event** layer, which no fight ever uses, and
-crossfades to it on the turns of cats that draw it.
+Everything is gated on being in the ice age - Lord Bunga's zone - and on the
+game having the **boss** layer up, so an ordinary skirmish in the zone is left
+alone and no other zone is touched at all.
+
+Inside that fight, the radio version is parked in the **event** layer, which no
+fight ever uses, and crossfaded to on the turns of cats that qualify.
 
 The radio version is not a stem - it is a separate performance, 203.0507s to
 the instrumental's 194.2857s, and the two never correlate as waveforms. But
@@ -64,6 +68,19 @@ so the trimming is done by decoding and discarding inside the stream's own
 pull - a few blocks per call, since 2.9s of vorbis decode in one go would miss
 an audio deadline.
 
+## When it switches
+
+The acting cat's INT is re-read every frame, not once when its turn starts, so
+a cat that makes itself stupid *during* its own turn - Stoopzerk, a concussion
+- hears the music change immediately rather than on its next turn.
+
+That means holding a `Character*` across frames, which is only safe because the
+window is bounded: it is taken at `BeginTurn`, dropped at `EndTurn`, and
+dropped the moment the cat dies. The last case is the one that matters, since a
+cat can be killed in the middle of its own turn. Between turns there is nobody
+to ask and the previous verdict stands, so the music does not flap while the
+enemy acts.
+
 ## Who hears it
 
 `is_player_cat` is a byte at `[Character + 0x489]`, so enemies are excluded -
@@ -79,14 +96,21 @@ draws again next fight, and differently next launch.
 
 ## Known, and why it is not shippable yet
 
-- **`MEWBUNGA_ALL_BUNGA` is on.** A test switch: it replaces every other music
-  layer in the game with the Bunga theme, so the pairing can be heard in any
-  fight instead of only at the ice age boss. It must be off to ship.
-- **Event encounters play the radio version**, because that is the layer it
-  borrows. Every slot costs something - `boss` is the one the actual Bunga
-  fight needs, and `map` is the hallway music - and `event` is the least
-  intrusive, but it is still wrong. Entering an event also resets the stem's
-  alignment, though it comes back in sync.
+- **`RADIO_CHANCE_PERCENT` is 0.** Set that way to test the legend's own
+  condition in isolation, so nothing but a cat at or below the INT threshold
+  can trigger it. At 0 the joke essentially never fires in a real run - put it
+  back to 50 before shipping.
+- **Ice age event encounters play the radio version**, because that is the
+  layer it borrows. Every slot costs something: `boss` is the one the actual
+  Bunga fight needs and `map` is the hallway music, so `event` is the least
+  bad. Only the ice age is affected, since nothing outside that zone is touched.
+- **A layer of our own would cost nothing, and does not work yet.**
+  `MEWBUNGA_OWN_LAYER 1` adds a fifth layer through the game's own `AddLayer`
+  at `0xa1a580`, which builds the layer and queues the chunk correctly - and
+  the mixer never pulls it. `SoundStream`'s constructor leaves `[stream+0]`
+  null, and the gain loop skips any layer whose stream has it null, so
+  something else must start playback and that call has not been found. The code
+  is kept for whoever picks it up.
 - The count-in offset is measured, not derived: 127,808 samples is 7.93 beats
   where an exact two bars would be 8.00, leaving about 23ms unaccounted for.
 - Nothing has been checked against a real Lord Bunga fight yet.
