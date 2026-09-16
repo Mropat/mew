@@ -158,16 +158,18 @@ enemy acts.
 they take turns too, and a LordBunga has `intelligence 5` like anything else.
 INT lives at `+0x5c8` and is the live, buffed value.
 
-A cat with INT at or below the threshold gets it. `RADIO_CHANCE_PERCENT` is 0,
-so that is the only way to trigger it - the legend's own condition and nothing
-else. Raising it gives every other cat a draw, which makes the joke fire in an
-ordinary run at the cost of no longer meaning anything.
+A player cat at or below the INT threshold gets it, and the threshold is 0 -
+the legend's own condition and nothing else. `is_player_cat` (a byte at
+`[Character + 0x489]`, written by `Character::init`) keeps enemies out; they
+take turns and have stats too, and a LordBunga has `intelligence 5` like
+anything else.
 
-The draw mixes a per-launch seed with the
-character's address rather than running an RNG per turn, so a cat keeps its
-verdict for the whole fight - a coin flipped every turn makes the music flap
-and reads as a bug. Characters are new objects each battle, so the same cat
-draws again next fight, and differently next launch.
+INT is read from `+0x5c8`, which is the live, buffed value - so a concussion or
+a Stoopzerk counts, and counts immediately.
+
+An earlier build gave every other cat a fixed random draw, so the joke would
+fire in an ordinary run without hunting for a 0 INT cat. It has been removed:
+at 0 INT the mod means something, and a coin flip made it mean nothing.
 
 ## Known, and why it is not shippable yet
 

@@ -32,24 +32,13 @@
 
 
 
-// Who hears it. INT 0 is the legend's own condition; the draw exists so the
-// joke can fire in an ordinary run, and is off by default. See the README.
-// The draw is per cat, not per turn - a coin flipped each turn would make the
-// music flap and read as a bug.
+// Who hears it: player cats at or below the threshold, which is 0 - the
+// legend's own condition and nothing else. Enemies are excluded by
+// is_player_cat; they take turns and have stats too.
+//
+// Read live, every frame of the acting cat's turn, so Stoopzerk or a
+// concussion is heard the moment it lands.
 #define RADIO_INT_THRESHOLD 0        // INT at or below this: always
-#define RADIO_CHANCE_PERCENT 0       // everyone else: this many percent
-                                     //
-                                     // 0 while the legend's own condition is
-                                     // being tested, so the only cat that can
-                                     // trigger it is one at or below the INT
-                                     // threshold - nothing else can muddy the
-                                     // result. Put it back to 50 afterwards,
-                                     // or the joke almost never fires in a
-                                     // real run.
-
-// is_player_cat, written by Character::init - true in player_cat.gon, false in
-// enemies.gon. Enemies take turns and have stats too, so without this the
-// music would flip on Bunga's turn as readily as on yours.
 #define OFF_IS_PLAYER_CAT 0x489
 
 // Character stat block, from the buff applier at 0x7d610, which does
@@ -120,42 +109,10 @@ static void make_game_string(GameString* out, const char* lit, unsigned long lon
     g_append(out, lit, n);
 }
 
-// --------------------------------------------------------------------
-// who hears the radio version
-// --------------------------------------------------------------------
-// splitmix64, so the draw is spread evenly over pointers that differ only in
-// their low bits - characters in one battle are allocated close together, and
-// a plain modulo of the address would put whole runs of them on the same side.
-static unsigned long long mix64(unsigned long long x) {
-    x += 0x9e3779b97f4a7c15ull;
-    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
-    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
-    return x ^ (x >> 31);
-}
-
-// Randomised once per launch, so the draw is genuinely unpredictable rather
-// than a fixed function of an address, and differs between playthroughs.
-static unsigned long long g_seed;
-
-static void seed_draw(void) {
-    LARGE_INTEGER qpc; QueryPerformanceCounter(&qpc);
-    g_seed = mix64((unsigned long long)qpc.QuadPart)
-           ^ mix64((unsigned long long)GetTickCount64())
-           ^ mix64((unsigned long long)GetCurrentProcessId());
-}
-
-// Mixing the session seed with the character's address rather than drawing
-// from a running RNG is deliberate: the answer has to be the same every time
-// it is asked for a given cat. A fresh draw per turn would make the music flap
-// back and forth mid-fight and read as a bug rather than a joke. Characters
-// are new objects each battle, so the same cat draws again next fight, and
-// differently next launch.
 static bool is_radio_cat(void* self) {
     if (!self) return false;
     if (!*(const unsigned char*)((const char*)self + OFF_IS_PLAYER_CAT)) return false;
-    const int intel = *(const int*)((const char*)self + OFF_INT);
-    if (intel <= RADIO_INT_THRESHOLD) return true;
-    return (mix64((unsigned long long)self ^ g_seed) % 100) < RADIO_CHANCE_PERCENT;
+    return *(const int*)((const char*)self + OFF_INT) <= RADIO_INT_THRESHOLD;
 }
 
 // Layers live in a std::vector<Layer>, 0x30 stride, reached through the
@@ -574,11 +531,7 @@ static void hooked_queue(void* self, void* path, int onfinish) {
     g_next(self, path, onfinish);
 }
 
-// Nothing switches yet - the layer machinery is still being mapped - so for now
-// this only reports what it WOULD do, once per cat per turn. That is enough to
-// see the rule behave in a real fight: the same cats should keep their verdict
-// all the way through, and roughly one in RADIO_CHANCE_IN_N of them should be
-// radio cats.
+// Records the acting cat, and logs the verdict once per turn.
 static void hooked_turn(void* self, int kind) {
     if (self) {
         const int intel = *(const int*)((const char*)self + OFF_INT);
@@ -684,8 +637,6 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
         }
     }
 
-    seed_draw();
-
     // Mewjector is required. Without it common/hookapi.inc patches each site with
     // a fixed 24-byte steal never checked against an instruction boundary;
     // Mewjector passes 0 and its length disassembler gets it right. It is also the
@@ -725,8 +676,8 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     if (g_mj.Log)
         g_mj.Log("mewbunga", "the Lord Bunga radio version: %s",
                  g_next ? "installed" : "FAILED to install");
-    say("mewbunga: queue=%s turn=%s  update=%s  (player cats: INT<=%d always, else %d%%)",
+    say("mewbunga: queue=%s turn=%s  update=%s  (player cats at INT <= %d)",
         g_next ? "hooked" : "FAILED", g_next_turn ? "hooked" : "FAILED",
-        g_next_update ? "hooked" : "FAILED", RADIO_INT_THRESHOLD, RADIO_CHANCE_PERCENT);
+        g_next_update ? "hooked" : "FAILED", RADIO_INT_THRESHOLD);
     return TRUE;
 }
