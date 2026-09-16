@@ -286,19 +286,6 @@ static void force_layers(unsigned char* group, int which) {
         if (g_mix < want) { g_mix += step; if (g_mix > want) g_mix = want; }
         else if (g_mix > want) { g_mix -= step; if (g_mix < want) g_mix = want; }
     }
-    if (g_mix <= 0.0) return;            // released: the game's own gains stand
-
-    // Never silence the game's music in favour of a layer that is not actually
-    // producing audio. Entering the Bunga room once did exactly that - our
-    // stem was added and faded up while decoding nothing, and the fight played
-    // with ambience only. If the stem is not alive, this does nothing at all.
-    if (g_pulls <= 0) {
-        *(double*)(begin + mine[0] * LAYER_STRIDE + OFF_GAIN_CUR) = 0.0;
-        if (mine[1] >= 0)
-            *(double*)(begin + mine[1] * LAYER_STRIDE + OFF_GAIN_CUR) = 0.0;
-        return;
-    }
-
     // Hand over across the seam: the live copy runs on into its tail while the
     // other starts the body again, and the two crossfade over a bar.
     const int live = g_live, other = live ^ 1;
@@ -323,6 +310,24 @@ static void force_layers(unsigned char* group, int which) {
         } else {
             g_xf = 0.0;
         }
+    }
+
+    // The handover runs whether or not anyone can hear it. It used to sit below
+    // this line, so a seam that passed during a normal cat's turn left the
+    // roles unswapped and priming disarmed: the live copy ran into its tail
+    // and took its own 203.051s loop, 8.765s off the Bunga grid, and the next
+    // cat to qualify raised a copy that was no longer on the beat.
+    if (g_mix <= 0.0) return;            // silent: the game's own gains stand
+
+    // Never silence the game's music in favour of a layer that is not actually
+    // producing audio. Entering the Bunga room once did exactly that - our
+    // stem was added and faded up while decoding nothing, and the fight played
+    // with ambience only. If the stem is not alive, this does nothing at all.
+    if (g_pulls <= 0) {
+        *(double*)(begin + mine[0] * LAYER_STRIDE + OFF_GAIN_CUR) = 0.0;
+        if (mine[1] >= 0)
+            *(double*)(begin + mine[1] * LAYER_STRIDE + OFF_GAIN_CUR) = 0.0;
+        return;
     }
 
     // Assign, do not nudge. Only the fight layer the game actually has up is
