@@ -15,6 +15,13 @@ struct Site {
     unsigned char sig[24];
 };
 
+// A mod that requires Mewjector never patches anything itself, and compiling
+// this in anyway costs it the VirtualAlloc / VirtualProtect / VirtualFree /
+// FlushInstructionCache imports - which together are the textbook signature of
+// code injection, and exactly what a machine-learning scanner scores. Define
+// MOD_REQUIRES_MEWJECTOR to leave it out; struct Site is still available.
+#ifndef MOD_REQUIRES_MEWJECTOR
+
 // jmp qword [rip+0] ; <8-byte target>
 //
 // Fourteen bytes, and it clobbers no register. That matters: the obvious
@@ -74,3 +81,5 @@ static void* install_detour(unsigned char* site, size_t stolen, const void* deto
     FlushInstructionCache(GetCurrentProcess(), site, stolen);
     return tramp;
 }
+
+#endif   // MOD_REQUIRES_MEWJECTOR

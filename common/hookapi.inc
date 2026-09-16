@@ -100,5 +100,11 @@ static void* install_hook(unsigned rva, unsigned char* site, size_t fallback_sto
         // got there first.
         return 0;
     }
+#ifdef MOD_REQUIRES_MEWJECTOR
+    // No Mewjector, no hook. This mod does not patch entry points itself.
+    (void)site; (void)fallback_stolen;
+    return 0;
+#else
     return install_detour(site, fallback_stolen, detour);
+#endif
 }

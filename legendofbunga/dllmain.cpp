@@ -24,6 +24,7 @@
 #include <cstring>
 
 #define MOD_HOOK_PRIORITY 50
+#define MOD_REQUIRES_MEWJECTOR   // no raw patching, so no injection-shaped imports
 #include "hookapi.inc"
 #include "sites.inc"
 
