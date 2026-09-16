@@ -171,20 +171,19 @@ An earlier build gave every other cat a fixed random draw, so the joke would
 fire in an ordinary run without hunting for a 0 INT cat. It has been removed:
 at 0 INT the mod means something, and a coin flip made it mean nothing.
 
-## Known, and why it is not shippable yet
+## Known
 
-- **Ice age event encounters play the radio version**, because that is the
-  layer it borrows. Only that zone: the substitution is gated on it, as is
-  everything else. Every slot costs something: `boss` is the one the actual
-  Bunga fight needs and `map` is the hallway music, so `event` is the least
-  bad. Only the ice age is affected, since nothing outside that zone is touched.
-- **A layer of our own would cost nothing, and does not work yet.**
-  `MEWBUNGA_OWN_LAYER 1` adds a fifth layer through the game's own `AddLayer`
-  at `0xa1a580`, which builds the layer and queues the chunk correctly - and
-  the mixer never pulls it. `SoundStream`'s constructor leaves `[stream+0]`
-  null, and the gain loop skips any layer whose stream has it null, so
-  something else must start playback and that call has not been found. The code
-  is kept for whoever picks it up.
-- The count-in offset is measured, not derived: 127,808 samples is 7.93 beats
-  where an exact two bars would be 8.00, leaving about 23ms unaccounted for.
-- Nothing has been checked against a real Lord Bunga fight yet.
+- **The loop handover has only been heard with the radio up.** It is meant to
+  run whether or not anyone is listening - a seam passing during an ordinary
+  cat's turn has to swap the copies over anyway, or the live one drifts off the
+  grid - and it is written to, but that case has not been observed. A trace
+  build logs `handed the body over to copy N` when it happens.
+- **`SKIP_SAMPLES` is 127,808; the measurement says 127,780.** Correlating the
+  two onset envelopes at 64-sample resolution gives a mean of 2.8975s with a
+  spread of 1.4ms across the whole track. The 28-sample difference is 0.6ms and
+  has been left alone rather than perturb something that currently sounds
+  right.
+- **`force_layers` ignores a group with more than eight layers.** A music set
+  is six now that this mod adds two. Another mod adding three or more would
+  quietly switch this one off.
+- Not released. It wants a Nexus page, and a second pair of ears.
