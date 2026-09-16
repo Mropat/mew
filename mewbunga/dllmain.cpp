@@ -50,31 +50,13 @@
 
 static unsigned char* g_base;
 static unsigned char* g_at[SITE_COUNT];
-static FILE*          g_log;
 
 typedef void (*QueueFn)(void* self, void* path, int onfinish);
 typedef void (*TurnFn)(void* self, int kind);
 static QueueFn g_next;
 static TurnFn  g_next_turn;
 
-// Verbose per-frame diagnostics. They earned their keep while the alignment
-// was being worked out; they are noise now. Build with -DMEWBUNGA_TRACE to get
-// them back.
-#ifdef MEWBUNGA_TRACE
-#define TRACE(...) say(__VA_ARGS__)
-#else
-#define TRACE(...) ((void)0)
-#endif
-
-// --------------------------------------------------------------------
-// logging
-// --------------------------------------------------------------------
-static void say(const char* fmt, ...) {
-    if (!g_log) return;
-    va_list ap; va_start(ap, fmt);
-    vfprintf(g_log, fmt, ap); va_end(ap);
-    fputc(10, g_log); fflush(g_log);
-}
+#include "trace.inc"
 
 // --------------------------------------------------------------------
 // talking to the game's C++ ABI
@@ -626,16 +608,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     DisableThreadLibraryCalls(mod);
     g_base = (unsigned char*)GetModuleHandleA(NULL);
 
-    char path[MAX_PATH];
-    if (GetModuleFileNameA(GetModuleHandleA(NULL), path, MAX_PATH)) {
-        char* slash = strrchr(path, (char)92);
-        if (slash) {
-            lstrcpyA(slash + 1, "mod_logs");
-            CreateDirectoryA(path, NULL);
-            lstrcatA(path, "\\mewbunga.log");
-            g_log = fopen(path, "w");
-        }
-    }
+    trace_open();
 
     // Mewjector is required. Without it common/hookapi.inc patches each site with
     // a fixed 24-byte steal never checked against an instruction boundary;
@@ -650,6 +623,10 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     const int bad = verify_sites_chained(SITES, SITE_COUNT, SITE_SIGLEN, g_base, g_at,
                                          GAME_TIMESTAMP, GAME_SIZEOFIMAGE);
     if (bad >= 0) {
+        // The one thing a user needs to know, so it goes where they will look.
+        if (g_mj.Log)
+            g_mj.Log("mewbunga", "not installing: %s (rva 0x%x) does not match this build",
+                     SITES[bad].name, SITES[bad].rva);
         say("mewbunga: site %s (rva 0x%x) does not match this build - not installing",
             SITES[bad].name, SITES[bad].rva);
         return TRUE;
