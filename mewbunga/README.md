@@ -69,12 +69,24 @@ so the trimming is done by decoding and discarding inside the stream's own
 pull - a few blocks per call, since 2.9s of vorbis decode in one go would miss
 an audio deadline.
 
-Two corrections keep it honest. Our layer joins a frame or two after the set is
-built, and each stream counts the samples it has produced at `+0x1a0`, so the
-difference between the boss layer's count and ours is exactly that lateness -
-folded into the skip. And a decode block is a whole second, so the skip can
-only land on a second boundary: aiming at the nearest one rather than the next
-leaves about 100ms either way instead of always running ahead.
+The skip is sample-exact, which took a while to earn. A stream decodes in
+blocks of `[stream+0x198]` frames, a field `QueueSongChunk` fills in from the
+file's sample rate - so a block is one whole second, and discarding whole
+blocks can only ever land on a second boundary. Every alignment problem this
+mod had came from that: a ~100ms residue at best, a full second out at worst,
+and a ragged splice at the loop point.
+
+But `0x198` is just a field on our own stream. Asking for exactly the frames
+still wanted on the final call of a skip ends it on the chosen sample, after
+which the rate goes back for ordinary playback. No rounding, no residue.
+
+Our layer also starts a whole number of blocks after the game's four, and that
+lag is not measurable at any single instant - the counters move in one-second
+steps, so one reading reports 0s and the next 3s. It is measurable
+*continuously*: with `S` samples discarded and a start lag of `lag`, the gap
+between our produced-sample count and the boss layer's settles at exactly
+`S - lag`. The shortfall is the lag, so the mod converges on it while the layer
+is silent rather than guessing once.
 
 ## Adding a layer
 

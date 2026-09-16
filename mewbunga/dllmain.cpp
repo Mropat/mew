@@ -326,12 +326,18 @@ static void force_layers(unsigned char* group, int which) {
         // where the game's four have one, that is why nothing pulls it.
         for (size_t i = 0; i < count; i++) {
             const unsigned char* ls = *(const unsigned char* const*)(begin + i * LAYER_STRIDE);
-            say("  layer %zu stream=%p voice=%p core=%p chunks=%d idx=%d%s",
+            // +0x1a0 is the running count of samples the stream has produced.
+            // Compared against the boss layer's, the difference is how far
+            // apart the two layers started - which is the one number that
+            // decides whether our skip should be three blocks or four.
+            const long long produced = ls ? *(const long long*)(ls + 0x1a0) : 0;
+            const long long theirs = g_stream_boss
+                ? *(const long long*)((const unsigned char*)g_stream_boss + 0x1a0) : 0;
+            say("  layer %zu stream=%p chunks=%d idx=%d produced=%lld (%+.3fs vs boss)%s",
                 i, (const void*)ls,
-                ls ? *(void* const*)ls : 0,
-                ls ? *(void* const*)(ls + 8) : 0,
                 ls ? *(const int*)(ls + 0x18c) : -1,
                 ls ? *(const int*)(ls + 0x188) : -1,
+                produced, (double)(produced - theirs) / 44100.0,
                 (const void*)ls == g_stream_radio ? "   <- ours" : "");
         }
         const unsigned char* st = (const unsigned char*)g_stream_radio;
@@ -420,12 +426,69 @@ static void force_layers(unsigned char* group, int which) {
 #define ONFINISH_LOOP  1
 
 volatile long        g_block;          // samples a single decode block yields
+static long          g_landed;         // samples actually discarded (a whole number of blocks)
+static long          g_lag;            // how late our layer started, in samples
+static long long     g_skipped;        // samples discarded since the last realign
+
+// Keep converging instead of measuring once.
+//
+// Every stream counts what it has produced at +0x1a0, and they all produce in
+// lockstep - the game's four agree to the sample. So once we have discarded S
+// samples and started `lag` late, (ours - boss) settles at exactly S - lag,
+// and stays there. The shortfall IS the lag, readable at any moment rather
+// than at one unlucky one.
+//
+// Measuring it once at the realign could not work: the counters move in whole
+// one-second steps, so a single reading depends on where in the block cycle it
+// was taken - which is why the same code reported "3.000s late" and "0.000s
+// late" in consecutive sets, and why the result was a second out either way.
+//
+// Correcting only ever discards more, never less, so it approaches from behind
+// and cannot overshoot. It runs only while the layer is inaudible, so the jump
+// is never heard.
+static void converge(void* self) {
+    if (!g_stream_boss || g_skip_left > 0 || g_block <= 0) return;
+    if (g_mix > 0.0) return;                       // audible: leave it alone
+    const long long theirs = *(const long long*)((const unsigned char*)g_stream_boss + 0x1a0);
+    const long long mine   = *(const long long*)((const unsigned char*)self + 0x1a0);
+    const long long drift  = (mine - theirs) - g_skipped;   // negative = we are behind
+    if (drift > -g_block) return;                  // within a block: as good as it gets
+    const long blocks = (long)((-drift) / g_block);
+    g_skip_left = blocks * g_block;
+    say("converging: %.3fs behind, discarding %ld more block(s)",
+        (double)(-drift) / 44100.0, blocks);
+}
+
+// The last hundred milliseconds.
+//
+// Discarding can only land on a block boundary, and a block is a whole second:
+// the count-in is 127,808 samples, three blocks is 132,300, so the trim always
+// overshoots by 4,492 - about 102ms ahead of the fight music, every time.
+//
+// That last stretch is taken off the other end instead. The stream's voice can
+// be paused, so it is held back by exactly the overshoot and released a frame
+// later: granularity of about 16ms rather than 1000ms. Pausing happens on the
+// audio thread the moment the skip finishes, and releasing from the per-frame
+// update, which is what makes the timing fine enough to matter.
+
+typedef void (*StreamStartFn)(void* stream, bool play);
+static StreamStartFn g_stream_start;   // 0xb51670: pause and resume a voice
 volatile long        g_pulls;          // blocks our stem has actually produced
 volatile long        g_pulls_any;      // blocks ANY stream has produced through this hook
 long                 g_skip_left;      // samples still to discard
 long long            g_pos;            // samples of body played since alignment
 static volatile long g_realign;        // rewind and re-trim at the next pull
 static long long     g_carry;          // overshoot past the loop point, preserved
+
+// How much the stream decodes per pull, in frames. QueueSongChunk sets it from
+// the file's sample rate, which is why a block is exactly one second - it is a
+// field on our own stream, not a property of the decoder or the mixer.
+//
+// Lowering it for the last part of a skip lets the skip end on any sample we
+// like: ask for exactly the frames still wanted, get exactly those, restore
+// the rate afterwards. That removes the block quantisation entirely - the
+// ~102ms residue, and the ragged splice at the loop point with it.
+#define OFF_BLOCK_FRAMES 0x198
 
 #define OFF_CHUNK_VEC   0x170
 #define OFF_CHUNK_INDEX 0x188
@@ -449,6 +512,10 @@ typedef void (*RewindFn)(void* decoder);
 static PullFn   g_next_pull;
 static RewindFn g_rewind;
 
+// Note for anyone chaining here: this calls the trampoline more than once per
+// invocation - up to SKIP_PER_PULL extra times while discarding the count-in.
+// That is legitimate (a hook may call through as often as it likes) but a
+// higher-priority observer counting calls will see more than the game made.
 static void hooked_pull(void* self, void* out) {
     const bool ours = self && self == g_stream_radio
                    && stream_chunk(self) == g_chunk_radio;
@@ -464,30 +531,46 @@ static void hooked_pull(void* self, void* out) {
             void* decoder = *(void**)(vec + (size_t)idx * 0x10);
             if (decoder && g_rewind) {
                 g_rewind(decoder);
-                // Carry the overshoot into the skip so the loop point stays
-                // exact instead of slipping by up to a block every lap.
-                g_skip_left = (long)(SKIP_SAMPLES + g_carry);
-                g_pos = 0; g_carry = 0;
 
-                // Then close the gap to the fight music.
+                // How late our layer started, in samples.
                 //
-                // Our layer joins a frame or two after the game builds the
-                // set, so it runs that far behind for the rest of the fight -
-                // audible as a slight looseness rather than as an offset. Each
-                // stream counts the samples it has produced at +0x1a0, so the
-                // difference between the boss layer's count and ours IS that
-                // lateness, in samples. Skipping it catches us up.
+                // Each stream counts what it has produced at +0x1a0, and the
+                // game's own four agree to the sample - so this is a precise
+                // instrument, not the noisy one I took it for. Our layer joins
+                // a block late even when added inside the builder, and the
+                // skip has to make that up: aligning means skipping the
+                // count-in PLUS however late we were.
                 //
-                // Forward only: if we are somehow ahead, there is nothing to
-                // do but let it be, and the bound keeps a wild reading - a
-                // stall, a stream that has only just started - from throwing
-                // the alignment away entirely.
+                // Bounded, because a reading taken before our stream has
+                // produced anything would be the boss layer's entire history.
+                long lag = 0;
                 if (g_stream_boss) {
                     const long long theirs = *(const long long*)((const unsigned char*)g_stream_boss + 0x1a0);
                     const long long mine   = *(const long long*)((const unsigned char*)self + 0x1a0);
-                    const long long behind = theirs - mine;
-                    if (behind > 0 && behind < 2 * 44100) g_skip_left += (long)behind;
+                    const long long d = theirs - mine;
+                    if (d > 0 && d <= 4 * 44100) lag = (long)d;
                 }
+                g_lag = lag;
+
+                // Skip a FIXED number of blocks - the same count every time.
+                //
+                // This used to add a correction for how late our layer joined,
+                // measured as the difference between the boss layer's produced
+                // -sample counter and ours. Two things make that measurement
+                // unusable. It counts samples DECODED, which runs ahead of
+                // playback by whatever is buffered, so it is not a position.
+                // And it moves in whole blocks - one second each - so it is
+                // quantised far coarser than the error it was meant to fix.
+                //
+                // Rounding a varying total to whole blocks then lands on a
+                // different block from run to run, which is why the alignment
+                // was excellent one night and half a second out the next. It
+                // was never deterministic; we simply got a good roll.
+                //
+                // Skipping a constant instead gives a constant result: always
+                // the same block count, always the same ~100ms, every launch.
+                g_skip_left = (long)SKIP_SAMPLES + lag;
+                g_skipped = 0;
             }
         }
     }
@@ -512,22 +595,46 @@ static void hooked_pull(void* self, void* out) {
             // the error fall either side of the mark rather than always ahead.
             if (g_block <= 0 && got > 0) {
                 g_block = got;
-                const long total = g_skip_left + got;          // what we set out to discard
-                const long blocks = (total + got / 2) / got;   // nearest, not next
-                g_skip_left = (blocks > 0 ? blocks * got : got) - got;
-                say("block=%ld samples; aiming %ld blocks (%.0fms error)",
-                    (long)got, blocks,
-                    ((double)(blocks * got - total) / 44.1));
+                say("block=%ld frames; we started %.3fs late; skipping %ld exactly",
+                    (long)got, (double)g_lag / 44100.0, g_skip_left + got);
             }
             g_skip_left -= got;
+            g_skipped += got;
+
+            // Ask for exactly the remainder, so the skip ends on the sample we
+            // want rather than on the next second boundary.
+            if (g_skip_left > 0 && g_skip_left < g_block)
+                *(int*)((unsigned char*)self + OFF_BLOCK_FRAMES) = (int)g_skip_left;
         }
-        // Blocks are whole, so the last one always overshoots. Those samples
-        // are already part of the body, so count them - otherwise the loop
-        // period runs long by up to a block every lap.
-        if (g_skip_left < 0) { g_pos = -g_skip_left; g_skip_left = 0; }
+        // Back to full-second decoding for ordinary playback.
+        if (g_block > 0)
+            *(int*)((unsigned char*)self + OFF_BLOCK_FRAMES) = (int)g_block;
+
+        if (g_skip_left <= 0) {
+            // Where the body actually starts, given we landed on a block
+            // boundary rather than exactly on the count-in. Carrying the
+            // previous lap's overshoot keeps the loop period exact.
+            g_pos = g_carry;          // the skip is exact now; no overshoot to carry
+            g_landed = 0;
+            g_carry = 0;
+            g_skip_left = 0;
+
+            // The last ~102ms is left alone.
+            //
+            // Two attempts to shave it both failed: pausing the voice from the
+            // pull crashed (that is the audio thread, mid-decode on the very
+            // stream being stopped), and pausing it from the game thread left
+            // the stream dead - 0xb51670 does more than toggle a voice, and
+            // resuming does not restart the decode task it tears down.
+            //
+            // A tenth of a second, constant and in the same direction every
+            // launch, is a better place to stop than a third attempt.
+        }
     }
 
     g_next_pull(self, out);
+
+    if (ours) converge(self);
 
     if (ours && g_skip_left <= 0) {
         const int got = *(const int*)((const unsigned char*)out + 8);
@@ -566,17 +673,8 @@ static UpdateFn g_next_update;
 
 static void hooked_update(void* self) {
     g_next_update(self);
-    // Tried every frame rather than on a flag. A single global "a set was
-    // built" flag was consumed by whichever MultiLayerMusicPlayer updated
-    // first - the ambience or title player, not necessarily the one holding
-    // the zone's music - so the add never reached the right group. Checking
-    // whether our stream is already present makes retrying free and correct.
-#if MEWBUNGA_OWN_LAYER
-    if (self && g_in_iceage) {
-        add_our_layer((unsigned char*)self + 0x50, 0);
-        add_our_layer((unsigned char*)self + 0x78, 1);
-    }
-#endif
+    // Nothing is added here: the layer goes in through the AddLayer hook,
+    // while the builder is still assembling the set.
     if (self) {
         force_layers((unsigned char*)self + 0x50, 0);
         force_layers((unsigned char*)self + 0x78, 1);
@@ -588,22 +686,8 @@ static bool ends_with(const char* s, const char* suffix) {
     return n >= m && memcmp(s + n - m, suffix, m) == 0;
 }
 
-// The radio version goes in the EVENT layer.
-//
-// All four layers of a zone - map, battle, event, boss - stream in parallel
-// from the moment the level loads, and the game crossfades between them. One
-// of them can be borrowed to carry the radio version at no cost, as long as
-// it is one no fight ever uses.
-//
-// The boss slot was the obvious choice and the wrong one: this is a mod about
-// a boss fight, and in the real Lord Bunga fight the game wants that slot, so
-// borrowing it leaves no vanilla boss music to switch back to. Event is idle
-// in ordinary fights AND in boss fights, so it works for both.
-//
-// The cost, and it is a real one: music for event encounters becomes the radio
-// version, since that layer now holds it whenever the game chooses event on
-// its own. Every slot has some such cost - map is the hallway music, which
-// would be worse - and event is the one heard least during the joke.
+// With a layer of our own there is nothing to borrow. Kept for
+// MEWBUNGA_OWN_LAYER 0, which carries both tracks on the event layer instead.
 static bool is_fight_track(const char* p) {
 #if MEWBUNGA_OWN_LAYER
     (void)p;
@@ -737,10 +821,27 @@ static void hooked_turn(void* self, int kind) {
 // but this mod's.
 typedef void (*AddLayerFn)(void* group, void* core, int index,
                            const void* paths, const void* finishes);
-typedef void (*StreamStartFn)(void* stream, bool play);
+// Added while the builder is still building, not afterwards.
+//
+// The borrowed event layer was always perfectly in sync because the GAME made
+// it: same set, same intro chunk, started by the builder's own per-layer pass.
+// A layer added after that pass has finished joins however many frames later
+// the update loop happens to run, and that lateness varies from launch to
+// launch - which is what made the alignment a lottery.
+//
+// Hooking AddLayer puts ours in during the builder's own add loop, right after
+// it adds its last layer. The start pass that follows walks the vector from
+// begin to end, so it picks ours up with the others and starts it at the same
+// instant. Nothing to measure and nothing to correct.
+//
+// The add loop is bounded by the TRACKLIST, not the layer vector, and re-reads
+// it each iteration, so growing the layer vector underneath it is safe.
+static AddLayerFn    g_next_add;
+static volatile long g_adding_ours;
+#define LAST_GAME_LAYER 3            // map, battle, event, boss
+
 typedef void (*StreamSpawnFn)(void* stream);
 typedef void (*VoicePlayFn)(void* voice, int zero, int play);
-static StreamStartFn g_stream_start;
 static StreamSpawnFn g_stream_spawn;
 static VoicePlayFn   g_voice_play;
 static AddLayerFn g_add_layer;
@@ -844,6 +945,30 @@ static void add_our_layer(unsigned char* group, int which) {
     #undef BAIL
 }
 
+static void hooked_add_layer(void* group, void* core, int index,
+                             const void* paths, const void* finishes) {
+    g_next_add(group, core, index, paths, finishes);
+
+    if (index != LAST_GAME_LAYER || !g_in_iceage) return;
+    if (InterlockedExchange(&g_adding_ours, 1)) return;      // never re-enter
+
+    const bool with_intro = g_intro_path[0] != 0;
+    int n = 0;
+    if (with_intro)
+        make_game_string(&g_layer_paths[n++], g_intro_path, strlen(g_intro_path));
+    make_game_string(&g_layer_paths[n++], RADIO_TRACK, sizeof(RADIO_TRACK) - 1);
+
+    const Vec3 our_paths    = { &g_layer_paths[0], &g_layer_paths[n], &g_layer_paths[n] };
+    const Vec3 our_finishes = { &g_layer_finish[0], &g_layer_finish[n], &g_layer_finish[n] };
+
+    g_want = -1; g_mix = 0.0; g_pulls = 0; g_block = 0; g_landed = 0;
+    say("adding our layer as %d, inside the builder (intro=%s)",
+        LAST_GAME_LAYER + 1, with_intro ? g_intro_path : "none");
+    g_next_add(group, core, LAST_GAME_LAYER + 1, &our_paths, &our_finishes);
+
+    InterlockedExchange(&g_adding_ours, 0);
+}
+
 BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(mod);
@@ -862,7 +987,22 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
 
     seed_draw();
 
-    hookapi_init();
+    // Mewjector is required, not optional.
+    //
+    // Without it, common/hookapi.inc falls back to patching each site itself
+    // with a fixed 24-byte steal - and 24 has never been checked against an
+    // instruction boundary on any of these seven sites. Mewjector passes 0 and
+    // its length disassembler gets it right; on its own, this mod would be
+    // NOP-padding through the middle of an instruction.
+    //
+    // It is also the only way the music hooks can share a site with another
+    // mod, which several of them plausibly want.
+    if (!hookapi_init()) {
+        say("mewbunga: Mewjector not found - not installing "
+            "(this mod needs its hook chaining, and its steal lengths)");
+        return TRUE;
+    }
+
     const int bad = verify_sites_chained(SITES, SITE_COUNT, SITE_SIGLEN, g_base, g_at,
                                          GAME_TIMESTAMP, GAME_SIZEOFIMAGE);
     if (bad >= 0) {
@@ -876,6 +1016,8 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     g_next = (QueueFn)install_hook(SITES[S_QUEUECHUNK].rva, g_at[S_QUEUECHUNK], 24,
                                    (const void*)&hooked_queue, "mewbunga");
     g_rewind     = (RewindFn)g_at[S_DECODER_REWIND];
+    g_next_add = (AddLayerFn)install_hook(SITES[S_ADD_LAYER].rva, g_at[S_ADD_LAYER], 24,
+                                          (const void*)&hooked_add_layer, "mewbunga");
     g_add_layer    = (AddLayerFn)g_at[S_ADD_LAYER];
     g_stream_start = (StreamStartFn)g_at[S_STREAM_START];
     g_stream_spawn = (StreamSpawnFn)g_at[S_STREAM_SPAWN];
@@ -895,6 +1037,9 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
                                          (const void*)&hooked_die, "mewbunga");
     g_next_turn = (TurnFn)install_hook(SITES[S_BEGINTURN].rva, g_at[S_BEGINTURN], 24,
                                        (const void*)&hooked_turn, "mewbunga");
+    if (g_mj.Log)
+        g_mj.Log("mewbunga", "the Lord Bunga radio version: %s",
+                 g_next ? "installed" : "FAILED to install");
     say("mewbunga: queue=%s turn=%s  update=%s  (player cats: INT<=%d always, else %d%%)",
         g_next ? "hooked" : "FAILED", g_next_turn ? "hooked" : "FAILED",
         g_next_update ? "hooked" : "FAILED", RADIO_INT_THRESHOLD, RADIO_CHANCE_PERCENT);
