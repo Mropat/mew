@@ -1,58 +1,22 @@
-// mewbunga - the Lord Bunga radio-version joke.
+// The Legend of Bunga
 //
-// Community legend says a cat with 0 INT makes the Lord Bunga fight play the
-// radio version of its song, "Mom I Really Hate You". It does not. This makes
-// it true - and when a cat drops to 0 INT mid-turn, by Stoopzerk or a
-// concussion, the music changes while it is still standing there.
+// A cat with 0 INT makes the Lord Bunga fight play the radio version of its
+// song, "Mom I Really Hate You" - the community legend, made true. A cat that
+// drops to 0 mid-turn, by Stoopzerk or a concussion, hears it change while it
+// is still standing there.
 //
-// The legend is better founded than it sounds. audio/music/radio.gon maps
-// every zone's instrumental to a vocal radio counterpart and lists
+// The mod adds two layers of its own carrying the radio version, trimmed and
+// looped into a stem of the Bunga song so every cat stays on one grid, and
+// crossfades to them on the turns of cats that qualify. Nothing is borrowed:
+// every zone layer keeps its job.
 //
-//     mom_i_really_hate_you  //ice age
+// README.md covers how the game's music system works, how the radio version
+// is made to fit it, and the measurements behind the constants here.
 //
-// while data/maps/iceage.gon puts Lord Bunga on the ice age boss node.
-//
-//
-// HOW THE GAME'S MUSIC WORKS
-//
-// A zone's four tracks - map, battle, event, boss - are not alternatives. All
-// four stream in parallel from the moment the level loads and the game
-// crossfades between them, which is why walking from a hallway into a fight is
-// seamless: nothing loads, a gain moves. Each layer is [intro, track]: every
-// one consumes the zone's intro sting before its body starts, which is what
-// keeps the four sample-aligned.
-//
-//
-// WHAT THIS MOD ADDS
-//
-// Two more layers of its own, carrying the radio version, built through the
-// game's own AddLayer from inside its own builder so they start in the same
-// pass as the other four. Nothing is borrowed: every zone layer keeps its job.
-//
-// The radio version is a different performance - 203.0507s against the
-// instrumental's 194.2857s, never correlating as waveforms - but it shares an
-// arrangement and a tempo, 164.10 BPM, and its onset envelope locks to the
-// instrumental at a constant offset across the whole track, to within a
-// millisecond. Trimming its two-bar count-in and looping it on the
-// INSTRUMENTAL's length turns it into a stem of the Bunga song. Every cat then
-// stays on one grid, and the swap between singers reads as one song with two
-// voices. Nothing is allowed to move that grid.
-//
-// Two copies, because the loop seam has to be hidden inside the radio track
-// itself: the Bunga theme has a male vocal, so ducking under it swaps singers
-// rather than covering a splice. One copy runs past the end of the body into
-// its tail - the song's real ending - while the other starts the body again
-// from the downbeat, and the two crossfade over a bar.
-//
-//
-// WHAT IS WORTH KNOWING BEFORE CHANGING ANY OF IT
-//
-// Decoded-sample counts advance a whole block at a time - one second - so they
-// can say WHETHER something should happen and are useless for shaping HOW.
-// Anything audible is driven off the frame clock instead. Where a position is
-// needed exactly, it is computed rather than sampled: the skip asks the stream
-// for precisely the frames it still wants (OFF_BLOCK_FRAMES is ours to set),
-// and the handover is timed from the position already tracked.
+// Two things to know before changing any of the timing. Decoded-sample counts
+// advance a whole block - one second - at a time, so they can decide WHETHER
+// something happens but never shape HOW; anything audible runs off the frame
+// clock. And where an exact position is needed it is computed, not sampled.
 
 #include <windows.h>
 #include <cstdio>
@@ -68,16 +32,10 @@
 
 
 
-// Who gets the radio version.
-//
-// The legend's rule - 0 INT - is the one the mod is named for, but a 0 INT cat
-// is not something you can produce on demand, so it cannot be the only trigger
-// or the mod is untestable and almost never fires in a real run. Every other
-// cat gets a fixed draw instead: one cat in RADIO_CHANCE_IN_N hears it.
-//
-// The draw is deterministic per cat, not per turn. A cat that is a radio cat
-// stays one for the whole fight, because a coin flipped every turn would make
-// the music flap back and forth and read as a bug rather than a joke.
+// Who hears it. INT 0 is the legend's own condition; the draw exists so the
+// joke can fire in an ordinary run, and is off by default. See the README.
+// The draw is per cat, not per turn - a coin flipped each turn would make the
+// music flap and read as a bug.
 #define RADIO_INT_THRESHOLD 0        // INT at or below this: always
 #define RADIO_CHANCE_PERCENT 0       // everyone else: this many percent
                                      //
@@ -89,14 +47,9 @@
                                      // or the joke almost never fires in a
                                      // real run.
 
-// is_player_cat, a byte written by Character::init - it is the gon property
-// that is "true" in data/characters/player_cat.gon and "false" in enemies.gon
-// and finalboss.gon. Found at the store "mov byte ptr [r14+0x489], al" right
-// after init parses the literal "is_player_cat" at 0xf9fc5.
-//
-// Enemies and arena scenery take turns too, and they have stats like anything
-// else - a LordBunga has intelligence 5 - so without this the music would flip
-// on the boss's turn as readily as on yours.
+// is_player_cat, written by Character::init - true in player_cat.gon, false in
+// enemies.gon. Enemies take turns and have stats too, so without this the
+// music would flip on Bunga's turn as readily as on yours.
 #define OFF_IS_PLAYER_CAT 0x489
 
 // Character stat block, from the buff applier at 0x7d610, which does
@@ -145,18 +98,12 @@ static const char* str_of(const void* s) {
     return cap > 15 ? *(const char* const*)s : (const char*)s;
 }
 
-// A std::string we hand to the game, built with the game's own allocator.
+// A std::string for the game, allocated by the game.
 //
-// The first attempt pointed a hand-built string at a static literal and passed
-// that. It crashed with 0xC0000374 - heap corruption - inside ntdll with
-// QueueSongChunk on the stack: something in there frees the string's buffer,
-// and a static literal is not the game's to free. Nor would our own malloc
-// have been, since this DLL's CRT heap is not the game's.
-//
-// std::string::append grows through the game's own allocator, which makes the
-// result safe for it to free, move or keep. A fresh object every call, never
-// reused: if the game does take ownership, reusing one would mean appending
-// into a freed pointer the second time round.
+// Passing one backed by our own memory corrupts its heap: something in
+// QueueSongChunk frees the buffer, and this DLL's CRT heap is not the game's.
+// append() grows through the right allocator. Fresh object every call - if the
+// game takes ownership, reusing one would append into a freed pointer.
 struct alignas(16) GameString {
     char               buf[16];
     unsigned long long size;
@@ -211,15 +158,9 @@ static bool is_radio_cat(void* self) {
     return (mix64((unsigned long long)self ^ g_seed) % 100) < RADIO_CHANCE_PERCENT;
 }
 
-// Where the layer set lives.
-//
-// Layers are held in a std::vector<Layer> with a 0x30 stride, reached through
-// the component's layer group: begin at group+0x00, end at group+0x08. Read
-// fresh every frame rather than cached - a vector that grows moves its
-// elements, and a cached Layer pointer becomes freed memory.
-// The zone whose music is currently loaded. The joke belongs to one fight, so
-// everything is gated on being in the ice age - Lord Bunga's zone, and the one
-// the radio version is the counterpart of.
+// Layers live in a std::vector<Layer>, 0x30 stride, reached through the
+// component's group: begin at +0x00, end at +0x08. Read fresh every frame -
+// a growing vector moves its elements, so a cached Layer pointer goes stale.
 static volatile long g_in_iceage;
 
 // Our track is the second chunk of our layer: [intro, radio]. Recorded as
@@ -245,36 +186,20 @@ static volatile long g_chunk_radio = 1;
 // Which fight layer the current cat should hear, or -1 for "do not interfere".
 static volatile int g_want = -1;
 
-// The cat currently taking its turn, or null when there is nobody to ask.
-//
-// Its INT is re-read every frame rather than once at BeginTurn, so a cat that
-// makes itself stupid DURING its own turn hears the music change immediately
-// instead of on its next turn.
-//
-// The pointer is only ever read between BeginTurn and EndTurn, and is dropped
-// the moment the cat dies. That window is the whole reason this is safe: a
-// character freed mid-fight would otherwise be read every frame forever.
+// The cat currently acting, or null. Its INT is re-read every frame so a cat
+// that makes itself stupid mid-turn hears the change at once. Only ever read
+// between BeginTurn and EndTurn, and dropped the moment the cat dies - that
+// window is what makes holding the pointer safe.
 static void* volatile g_acting;
 
-// Force the choice every frame, after the game has updated.
+// Set the gains every frame, after the game's own update.
 //
-// Writing the gains once at BeginTurn was not enough: the music switched for
-// about a second and then slid back. The ramp at 0xa1a7e0 only moves current
-// toward target, so it was not the culprit - something re-set the TARGET, and
-// finding what was more work than simply having the last word. Setting the
-// target after the game's own update each frame does that, and setting only
-// the target (never current) leaves the crossfade to the game, so the switch
-// fades the way its own transitions do.
+// Writing the layer TARGET loses: something re-asserts targets almost every
+// frame, and on the one occasion it does not, the forced value surfaces later
+// over the reward screen. Current is what the mixer uses, and this runs after
+// the ramp that would otherwise pull it back.
 //
-// The override is deliberately self-limiting. It only ever redirects a choice
-// the game has ALREADY made between the two fight layers: if the game wants
-// neither - in the hallway, on the map, during an event - both targets are
-// zero, and this leaves them alone. So it can change which fight music plays
-// but can never start music the game did not ask for.
-// The streams, so layers can be identified by what they play rather than by a
-// guessed index. The queue order happens to be battle, map, event, boss - but
-// that is an observation about two zones, not a promise, and a set with a
-// missing slot would shift it. Matching on the stream pointer cannot drift.
+// Self-limiting: it only ever redirects a fight the game is already scoring.
 static char           g_intro_path[128];  // the zone's intro sting, seen as it is queued
 static void* volatile g_stream_battle;
 static void* volatile g_stream_boss;
@@ -283,14 +208,9 @@ static void* volatile g_stream_boss;
 // over roughly a second, so this is in the same register.
 #define FADE_MS 900.0
 
-// Our own fade envelope: 0 = the game's music, 1 = the radio version.
-//
-// Nudging the gain by a fixed amount per frame fought the game's ramp pulling
-// the same value the other way, and gave a fade-in that was quick and uneven
-// while the fade-out - performed by the game once we stopped writing - sounded
-// right. Assigning an envelope we compute ourselves settles it: the shape and
-// duration are ours, and the game's ramp cannot argue. Timed off the clock, so
-// it lasts the same wall-clock time at any frame rate.
+// Our fade envelope: 0 = the game's music, 1 = the radio version. Assigned,
+// not nudged - nudging fought the game's ramp and gave an uneven fade - and
+// timed off the clock so it lasts the same at any frame rate.
 static double        g_mix;
 static unsigned long g_mix_tick;
 
@@ -302,51 +222,28 @@ extern volatile long g_pulls_any;
 extern long          g_skip_left;
 extern long long     g_pos;   // defined with the stem state below
 
-// Trim the radio version into a stem of the Bunga theme.
+// Trim the radio version into a stem of the Bunga theme: drop its two-bar
+// count-in and its four-bar tail, and loop what remains on the INSTRUMENTAL's
+// length. The numbers and how they were measured are in the README.
 //
-// Measured from the two files: the instrumental is exactly 8,568,000 samples
-// (194.2857s) and the radio version 8,954,535. The radio carries a two-bar
-// count-in of 127,808 samples - 7.93 beats at their shared 164.10 BPM,
-// measured by correlating onset envelopes at 64-sample resolution - and a
-// four-bar tail of 258,727 samples afterwards.
-//
-// Discard both and what remains is the same body, the same length as the
-// instrumental. Loop it on the INSTRUMENTAL's length rather than its own and
-// the two stay locked together indefinitely, so a switch lands on the same bar
-// and the same beat.
-//
-// This replaces restarting the track at each switch. Restarting was consistent
-// but it always entered at the top of the song, no matter where the fight's
-// music had got to. Looping it as a stem means it is simply always in the
-// right place, and nothing needs to happen at the moment of the switch at all.
+// There is no seek, so trimming means decoding and discarding - a few blocks
+// per call, since 2.9s of vorbis in one go would miss an audio deadline.
 #define SKIP_SAMPLES   127808          // the two-bar count-in
 #define SKIP_PER_PULL  8               // blocks discarded per call, to spread the work
 
-// A layer holds a LIST of chunks, and which one plays is just an int.
-//
-//   [stream+0x188]  active chunk index      [stream+0x18c]  chunk count
-//   [chunk+8]       OnFinish: 0 advance, 1 loop in place, 2 advance-or-loop
-//
-// Our layer carries two chunks, [intro, radio], the same shape the game gives
-// its own. OnFinish 1 loops a chunk in place; 2 advances, looping only on the
-// last. The intro gets 2 so it advances into the track.
-//
+// OnFinish, at [chunk+8]: 0 advance, 1 loop in place, 2 advance-or-loop. Our
+// layers are [intro, radio], matching the shape the game gives its own.
 
 volatile long        g_block;          // frames a single decode yields
 volatile long        g_pulls;          // blocks our stems have produced
 volatile long        g_pulls_any;      // blocks ANY stream produced through this hook
 
-// Two copies of the radio version, taking turns.
-//
-// The loop seam cannot be hidden behind the Bunga layer - that track has a
-// male vocal of its own, so ducking to it swaps singers instead of covering a
-// splice. It has to be hidden inside the radio version itself, which is what
-// its 5.867s tail is for: the live copy runs on past the end of the body into
-// its real ending while the other starts the body afresh, and the two are
-// crossfaded. Same recording, same bar, no splice to hear.
+// Two copies of the radio version, taking turns, so the loop seam can be
+// hidden inside the radio track itself - the Bunga theme has a male vocal, so
+// ducking under it swaps singers rather than covering a splice.
 //
 // A stem's position is measured from the START OF THE BODY, so it is negative
-// while the count-in is playing and crosses zero exactly on the downbeat.
+// during the count-in and crosses zero on the downbeat.
 typedef struct {
     void*         stream;
     long          skip_left;   // samples still to discard
@@ -463,25 +360,14 @@ static void force_layers(unsigned char* group, int which) {
         return;
     }
 
-    // Hand over across the seam.
-    //
-    // The live copy runs past the end of the body into its tail - the song's
-    // real ending, five and a half seconds of it - while the other one starts
-    // the body again from the downbeat. Crossfading between them over a bar
-    // means the join is two takes of the same music at the same point, so
-    // there is no splice to hear. Nothing is borrowed from the Bunga layer,
-    // which has a singer of its own.
+    // Hand over across the seam: the live copy runs on into its tail while the
+    // other starts the body again, and the two crossfade over a bar.
     const int live = g_live, other = live ^ 1;
     if (mine[other] >= 0) {
         const long long past = g_stem[live].pos - BODY_SAMPLES;
 
-        // Run the crossfade off the frame clock, not off the stem's position.
-        //
-        // Position advances one block at a time - one whole second - so a fade
-        // a bar long got one or two updates across its entire length: a step
-        // down to about a third, then a jump. Which is precisely what it
-        // sounded like. The position decides WHEN the handover starts; how it
-        // is shaped is a matter for the frames.
+        // Position decides WHEN the handover starts; the frame clock shapes it. Driven
+        // off position, a bar-long fade got one or two updates - a step, then a jump.
         if (past >= 0 && g_xf_tick == 0) {
             g_xf_tick = now ? now : 1;
             say("handover: blending the tail into the fresh start over %dms", XF_MS);
@@ -599,16 +485,9 @@ static void hooked_pull(void* self, void* out) {
             if (si == g_live && !g_armed) {
                 const long long remaining = BODY_SAMPLES - st->pos;
 
-                // Lands exactly on the seam, never a bar either side.
-                //
-                // Delaying it by a bar made the blend sit better but stretched
-                // the radio's loop a bar longer than the Bunga song's, and the
-                // grid is the whole point: every cat stays on the same beat
-                // and the swap between singers reads as one song with two
-                // voices. Nothing is allowed to move that. The overlap is the
-                // outgoing tail against the incoming's fresh start - both are
-                // valid continuations of the same bar, which is what makes the
-                // blend possible at all.
+                // Lands exactly on the seam, never a bar either side. Delaying it blended
+                // better but stretched the radio's loop past the Bunga song's, and the shared
+                // grid is the whole point.
                 if (remaining <= SKIP_SAMPLES && remaining > 0) {
                     Stem* nx = &g_stem[si ^ 1];
                     nx->skip_req = (long)(SKIP_SAMPLES - remaining);
@@ -718,35 +597,17 @@ static void hooked_turn(void* self, int kind) {
 }
 
 
-// A layer of our own.
+// Our layers, added from inside the builder's own add loop so its start pass
+// brings them up with the other four. AddLayer alone leaves a layer that
+// nothing decodes for; the builder does two more things per layer afterwards.
 //
-// Earlier builds borrowed the event layer, because a zone only ever uses four
-// and event is the one no fight touches. It worked, but event encounters then
-// played the radio version, which is not the joke - and every other slot is
-// worse: boss is the one the actual Bunga fight needs, map is the hallway.
-//
-// The group can simply be told to hold five. AddLayer grows the vector and
-// initialises the element, which is exactly what the game does for its own
-// four, so the fifth is an ordinary layer that happens to be ours. The game's
-// selector never chooses it, which is the point: its gain is nobody's business
-// but this mod's.
+// The add loop is bounded by the TRACKLIST and re-reads it each iteration, so
+// growing the layer vector underneath it is safe.
 typedef void (*AddLayerFn)(void* group, void* core, int index,
                            const void* paths, const void* finishes);
-// Added while the builder is still building, not afterwards.
-//
-// The borrowed event layer was always perfectly in sync because the GAME made
-// it: same set, same intro chunk, started by the builder's own per-layer pass.
-// A layer added after that pass has finished joins however many frames later
-// the update loop happens to run, and that lateness varies from launch to
-// launch - which is what made the alignment a lottery.
-//
-// Hooking AddLayer puts ours in during the builder's own add loop, right after
-// it adds its last layer. The start pass that follows walks the vector from
-// begin to end, so it picks ours up with the others and starts it at the same
-// instant. Nothing to measure and nothing to correct.
-//
-// The add loop is bounded by the TRACKLIST, not the layer vector, and re-reads
-// it each iteration, so growing the layer vector underneath it is safe.
+// Added while the builder is still building. A layer added after its start
+// pass has run joins however many frames later the update loop happens to run,
+// and that lateness varies - which made the alignment a lottery.
 static AddLayerFn    g_next_add;
 static volatile long g_adding_ours;
 #define LAST_GAME_LAYER 3            // map, battle, event, boss
@@ -825,16 +686,10 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
 
     seed_draw();
 
-    // Mewjector is required, not optional.
-    //
-    // Without it, common/hookapi.inc falls back to patching each site itself
-    // with a fixed 24-byte steal - and 24 has never been checked against an
-    // instruction boundary on any of these seven sites. Mewjector passes 0 and
-    // its length disassembler gets it right; on its own, this mod would be
-    // NOP-padding through the middle of an instruction.
-    //
-    // It is also the only way the music hooks can share a site with another
-    // mod, which several of them plausibly want.
+    // Mewjector is required. Without it common/hookapi.inc patches each site with
+    // a fixed 24-byte steal never checked against an instruction boundary;
+    // Mewjector passes 0 and its length disassembler gets it right. It is also the
+    // only way these sites can be shared with another mod.
     if (!hookapi_init()) {
         say("mewbunga: Mewjector not found - not installing "
             "(this mod needs its hook chaining, and its steal lengths)");

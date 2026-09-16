@@ -1,10 +1,13 @@
-# mewbunga
+# The Legend of Bunga
 
 **Work in progress. Not released, not ready to ship.**
 
 There is a community legend that a cat with 0 INT makes the Lord Bunga fight
 play the radio version of its song, "Mom I Really Hate You". It does not. This
-mod makes it true.
+mod makes it true - and a cat that drops to 0 mid-turn, by Stoopzerk or a
+concussion, hears it change while it is still standing there.
+
+Built as `mewbunga.dll`, keeping the naming of the other mods in this repo.
 
 The legend is more grounded than it sounds. `audio/music/radio.gon` maps every
 zone's instrumental to a vocal radio counterpart, and lists
@@ -110,6 +113,31 @@ The layer is built as `[intro, radio]`, mirroring the game's own `[intro,
 track]`. Every layer of a set consumes the zone's intro sting before its body
 begins, which is exactly why the four stay sample-aligned; a layer without one
 starts its body about six seconds early and is out of step all fight.
+
+## Timing, and two traps in it
+
+Anything in this mod that has to be exact runs into the same wall: a stream
+decodes a whole block at a time, and a block is one second - `[stream+0x198]`,
+which `QueueSongChunk` fills in from the file's sample rate.
+
+**Decoded-sample counts can decide whether, never how.** They advance a second
+at a time, so they are fine for "has the body ended yet" and useless for
+shaping a fade. Everything audible - the switch, the loop crossfade - runs off
+the frame clock instead. A crossfade driven off stem position got one or two
+updates across a bar, heard as a step down and a jump.
+
+**Where an exact position is needed, it is computed rather than sampled.**
+`0x198` is a field on our own stream, so the last call of a skip asks for
+precisely the frames still wanted and the skip ends on the chosen sample. The
+loop handover is timed the same way: when the live copy has `remaining` samples
+of body left, the other is rewound and skipped by `count-in - remaining`, so it
+arrives on the downbeat no matter how often we get to look.
+
+Cross-stream comparisons are a second-grained *measurement*, not a fine one:
+the game's layers decode a second at a time and ours may not, so the difference
+between two produced-sample counters carries that much slop. A correction built
+on it must fire once, with a threshold of a second - a forward-only correction
+on a noisy signal walks the song out of alignment one step at a time.
 
 ## When it switches
 

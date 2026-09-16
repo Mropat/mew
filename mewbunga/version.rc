@@ -16,7 +16,7 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName",      "Mropat"
-            VALUE "FileDescription",  "Lord Bunga fight plays the radio version"
+            VALUE "FileDescription",  "The Legend of Bunga"
             VALUE "FileVersion",      "1.0.6.0"
             VALUE "InternalName",     "mewbunga"
             VALUE "OriginalFilename", "mewbunga.dll"
