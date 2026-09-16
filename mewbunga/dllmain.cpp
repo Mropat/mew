@@ -1,29 +1,58 @@
 // mewbunga - the Lord Bunga radio-version joke.
 //
 // Community legend says a cat with 0 INT makes the Lord Bunga fight play the
-// radio version of its song, "Mom I Really Hate You". It does not, but the
-// track is real: audio/music/radio.gon maps every zone's instrumental to a
-// vocal radio counterpart and lists
+// radio version of its song, "Mom I Really Hate You". It does not. This makes
+// it true - and when a cat drops to 0 INT mid-turn, by Stoopzerk or a
+// concussion, the music changes while it is still standing there.
+//
+// The legend is better founded than it sounds. audio/music/radio.gon maps
+// every zone's instrumental to a vocal radio counterpart and lists
 //
 //     mom_i_really_hate_you  //ice age
 //
 // while data/maps/iceage.gon puts Lord Bunga on the ice age boss node.
 //
-// The two are the same arrangement at the same tempo - both 164.10 BPM - and
-// their onset envelopes lock at a constant +2.902s across the whole track,
-// which is 7.94 beats: the radio version has a two-bar count-in. They are not
-// the same master recording, so they never correlate as waveforms, but they
-// play together perfectly once that offset is taken out. That is what the
-// layered version of this mod will need.
 //
-// THIS BUILD IS THE FIRST STEP AND IS DELIBERATELY BLUNT. It swaps the track
-// in EVERY fight, with no INT check, so the mechanism can be tested without
-// walking to the ice age boss every time. What it proves: that rewriting the
-// path at SoundStream::QueueSongChunk actually controls what the game plays.
+// HOW THE GAME'S MUSIC WORKS
 //
-// Not the finished joke. The finished one queues the radio song into an idle
-// layer slot and crossfades per character at BeginTurn, so the cat whose turn
-// it is decides what you hear.
+// A zone's four tracks - map, battle, event, boss - are not alternatives. All
+// four stream in parallel from the moment the level loads and the game
+// crossfades between them, which is why walking from a hallway into a fight is
+// seamless: nothing loads, a gain moves. Each layer is [intro, track]: every
+// one consumes the zone's intro sting before its body starts, which is what
+// keeps the four sample-aligned.
+//
+//
+// WHAT THIS MOD ADDS
+//
+// Two more layers of its own, carrying the radio version, built through the
+// game's own AddLayer from inside its own builder so they start in the same
+// pass as the other four. Nothing is borrowed: every zone layer keeps its job.
+//
+// The radio version is a different performance - 203.0507s against the
+// instrumental's 194.2857s, never correlating as waveforms - but it shares an
+// arrangement and a tempo, 164.10 BPM, and its onset envelope locks to the
+// instrumental at a constant offset across the whole track, to within a
+// millisecond. Trimming its two-bar count-in and looping it on the
+// INSTRUMENTAL's length turns it into a stem of the Bunga song. Every cat then
+// stays on one grid, and the swap between singers reads as one song with two
+// voices. Nothing is allowed to move that grid.
+//
+// Two copies, because the loop seam has to be hidden inside the radio track
+// itself: the Bunga theme has a male vocal, so ducking under it swaps singers
+// rather than covering a splice. One copy runs past the end of the body into
+// its tail - the song's real ending - while the other starts the body again
+// from the downbeat, and the two crossfade over a bar.
+//
+//
+// WHAT IS WORTH KNOWING BEFORE CHANGING ANY OF IT
+//
+// Decoded-sample counts advance a whole block at a time - one second - so they
+// can say WHETHER something should happen and are useless for shaping HOW.
+// Anything audible is driven off the frame clock instead. Where a position is
+// needed exactly, it is computed rather than sampled: the skip asks the stream
+// for precisely the frames it still wants (OFF_BLOCK_FRAMES is ours to set),
+// and the handover is timed from the position already tracked.
 
 #include <windows.h>
 #include <cstdio>
@@ -35,35 +64,9 @@
 #include "sites.inc"
 
 #define RADIO_TRACK "audio/music/radio/songs/mom_i_really_hate_you.ogg"
-#define BUNGA_TRACK "audio/music/iceage/iceage_boss.ogg"
-
-// TEST BUILD SWITCH - not how the mod should ship.
-//
-// With this on, every other music layer in the adventure becomes the Lord
-// Bunga track, so the pairing you hear anywhere is the real one: the ice age
-// boss instrumental against its own vocal radio version. Off, the radio
-// version is crossfaded against whatever zone you happen to be in, which
-// sounds like two different songs because it is.
-//
-// It also makes the loop behaviour audible. The instrumental is 194.286s and
-// the radio version 203.051s, both looping independently, so they drift 8.765s
-// further apart every time round.
-#define MEWBUNGA_ALL_BUNGA 0
 
 
-// The radio version carries a two-bar count-in, so at any moment it is playing
-// content 2.902s earlier in the arrangement than the instrumental - which is
-// why a switch sounds a couple of bars out.
-//
-// Holding the instrumental layers back by that amount was tried and reverted.
-// It aligned them, but it assumed the stream would still be alive when the
-// held chunk came due - and crossing into the shop tears the music set down
-// and builds a new one. The chunks were released into streams that no longer
-// mattered, and the next fight had no music at all. The same shape of mistake
-// could have been a use-after-free rather than silence.
-//
-// The alignment still needs doing, but through the decoder's own position
-// rather than by second-guessing when the game wants a chunk queued.
+
 
 // Who gets the radio version.
 //
@@ -121,6 +124,9 @@ static TurnFn  g_next_turn;
 #define TRACE(...) ((void)0)
 #endif
 
+// --------------------------------------------------------------------
+// logging
+// --------------------------------------------------------------------
 static void say(const char* fmt, ...) {
     if (!g_log) return;
     va_list ap; va_start(ap, fmt);
@@ -128,6 +134,9 @@ static void say(const char* fmt, ...) {
     fputc(10, g_log); fflush(g_log);
 }
 
+// --------------------------------------------------------------------
+// talking to the game's C++ ABI
+// --------------------------------------------------------------------
 // MSVC std::string: 16-byte SSO buffer, size at +0x10, capacity at +0x18.
 // Capacity over 15 means +0x00 holds a heap pointer instead of the characters.
 static const char* str_of(const void* s) {
@@ -164,6 +173,9 @@ static void make_game_string(GameString* out, const char* lit, unsigned long lon
     g_append(out, lit, n);
 }
 
+// --------------------------------------------------------------------
+// who hears the radio version
+// --------------------------------------------------------------------
 // splitmix64, so the draw is spread evenly over pointers that differ only in
 // their low bits - characters in one battle are allocated close together, and
 // a plain modulo of the address would put whole runs of them on the same side.
@@ -216,6 +228,13 @@ static volatile long g_chunk_radio = 1;
 
 #define BODY_SAMPLES   8568000         // the instrumental's exact length
 
+
+// SoundStream fields, as read out of the pull and QueueSongChunk.
+#define OFF_CHUNK_VEC    0x170   // vector of chunks, 0x10 stride, decoder first
+#define OFF_CHUNK_INDEX  0x188   // which chunk is live
+#define OFF_CHUNK_COUNT  0x18c   // how many chunks are queued
+#define OFF_BLOCK_FRAMES 0x198   // frames decoded per pull; set from the sample rate
+#define OFF_PRODUCED     0x1a0   // running count of frames this stream has produced
 
 #define LAYER_STRIDE   0x30
 #define OFF_GAIN_CUR   0x20      // current gain: ramped toward the target
@@ -312,7 +331,6 @@ extern long long     g_pos;   // defined with the stem state below
 // its own. OnFinish 1 loops a chunk in place; 2 advances, looping only on the
 // last. The intro gets 2 so it advances into the track.
 //
-#define ONFINISH_LOOP  1
 
 volatile long        g_block;          // frames a single decode yields
 volatile long        g_pulls;          // blocks our stems have produced
@@ -347,9 +365,6 @@ static unsigned long g_xf_tick;        // when the handover began, 0 when idle
 // A bar, in milliseconds: four beats at 164.10 BPM.
 #define XF_MS          1463
 
-// One bar at 164.10 BPM - four beats, 1.463s. Long enough to be a crossfade
-// rather than a cut, short enough to stay inside the 5.867s tail.
-#define BAR_SAMPLES    64507
 
 // The game's layers decode a second at a time, so comparing their produced
 // counts with ours is only good to about a second. Corrections finer than that
@@ -361,8 +376,8 @@ static volatile long g_converged;
 static void converge(void* self, Stem* st) {
     if (!g_stream_boss || st->skip_left > 0 || g_block <= 0) return;
     if (g_mix > 0.0 || g_converged) return;
-    const long long theirs = *(const long long*)((const unsigned char*)g_stream_boss + 0x1a0);
-    const long long mine   = *(const long long*)((const unsigned char*)self + 0x1a0);
+    const long long theirs = *(const long long*)((const unsigned char*)g_stream_boss + OFF_PRODUCED);
+    const long long mine   = *(const long long*)((const unsigned char*)self + OFF_PRODUCED);
     const long long drift  = (mine - theirs) - st->skipped;
     if (drift > -(long long)CONVERGE_FLOOR) return;
     const long blocks = (long)((-drift) / CONVERGE_FLOOR);
@@ -379,6 +394,9 @@ static int stem_of(void* stream) {
 }
 
 
+// --------------------------------------------------------------------
+// per-frame: gains, the switch, and the loop handover
+// --------------------------------------------------------------------
 static void force_layers(unsigned char* group, int which) {
     (void)which;   // only used by the trace build
     unsigned char* begin = *(unsigned char**)(group + 0x00);
@@ -494,9 +512,10 @@ static void force_layers(unsigned char* group, int which) {
 
 #define OFF_BLOCK_FRAMES 0x198
 
-#define OFF_CHUNK_VEC   0x170
-#define OFF_CHUNK_INDEX 0x188
 
+// --------------------------------------------------------------------
+// the two radio stems, and keeping them on the grid
+// --------------------------------------------------------------------
 static int stream_chunk(void* stream) {
     return stream ? *(const int*)((const unsigned char*)stream + OFF_CHUNK_INDEX) : -1;
 }
@@ -506,6 +525,9 @@ typedef void (*RewindFn)(void* decoder);
 static PullFn   g_next_pull;
 static RewindFn g_rewind;
 
+// --------------------------------------------------------------------
+// the decode path: trimming and looping our stems
+// --------------------------------------------------------------------
 // Note for anyone chaining here: this calls the trampoline more than once per
 // invocation - up to SKIP_PER_PULL extra times while discarding the count-in.
 // That is legitimate (a hook may call through as often as it likes) but a
@@ -520,8 +542,8 @@ static void hooked_pull(void* self, void* out) {
         // Chunk layout read out of the pull itself: the chunk vector is at
         // stream+0x170 with a 0x10 stride, the live index at stream+0x188,
         // and the decoder is the first field of the chunk.
-        unsigned char* vec = *(unsigned char**)((unsigned char*)self + 0x170);
-        const int idx = *(const int*)((unsigned char*)self + 0x188);
+        unsigned char* vec = *(unsigned char**)((unsigned char*)self + OFF_CHUNK_VEC);
+        const int idx = *(const int*)((unsigned char*)self + OFF_CHUNK_INDEX);
         if (vec && idx >= 0 && idx < 64) {
             void* decoder = *(void**)(vec + (size_t)idx * 0x10);
             if (decoder && g_rewind) {
@@ -609,6 +631,9 @@ typedef void (*DieFn)(void* self, bool a, void* b, bool c);
 static EndTurnFn g_next_endturn;
 static DieFn     g_next_die;
 
+// --------------------------------------------------------------------
+// combat hooks: whose turn it is
+// --------------------------------------------------------------------
 static void hooked_endturn(void* self) {
     if (self && self == g_acting) g_acting = 0;
     g_next_endturn(self);
@@ -637,6 +662,9 @@ static bool ends_with(const char* s, const char* suffix) {
     return n >= m && memcmp(s + n - m, suffix, m) == 0;
 }
 
+// --------------------------------------------------------------------
+// music hooks: what is being queued, and where
+// --------------------------------------------------------------------
 static void hooked_queue(void* self, void* path, int onfinish) {
     const char* p = str_of(path);
     if (p && ends_with(p, "_intro.ogg") && strlen(p) < sizeof(g_intro_path)) {
@@ -651,7 +679,7 @@ static void hooked_queue(void* self, void* path, int onfinish) {
         InterlockedExchange(&g_stem[si].realign, 1);
         // Our chunk's index is however many are already queued on this stream
         // - 1 when it follows an intro, 0 without one.
-        g_chunk_radio = *(const int*)((const unsigned char*)self + 0x18c);
+        g_chunk_radio = *(const int*)((const unsigned char*)self + OFF_CHUNK_COUNT);
         say("radio copy %d is streaming: %p", si, self);
     }
     // Which zone's music is loading. Every layer path is <zone>/<name>_kind.ogg,
@@ -663,13 +691,6 @@ static void hooked_queue(void* self, void* path, int onfinish) {
     if (p && ends_with(p, "_battle.ogg")) g_stream_battle = self;
     if (p && ends_with(p, "_boss.ogg"))   g_stream_boss   = self;
 
-#if MEWBUNGA_ALL_BUNGA
-    if (p && (ends_with(p, "_map.ogg") || ends_with(p, "_battle.ogg")
-                                       || ends_with(p, "_boss.ogg"))) {
-        queue_as(self, BUNGA_TRACK, sizeof(BUNGA_TRACK) - 1, path, onfinish);
-        return;
-    }
-#endif
     if (p) TRACE("pass %s", p);
     g_next(self, path, onfinish);
 }
@@ -738,6 +759,9 @@ static volatile long g_adding_ours;
 // anything downstream that copies or frees it must find a buffer it owns.
 struct Vec3 { const void* begin; const void* end; const void* cap; };
 
+// --------------------------------------------------------------------
+// building our layers inside the game's own builder
+// --------------------------------------------------------------------
 // Our layer is built as [intro, radio], mirroring the game's own [intro,
 // track]. Every layer of a set begins with the zone's intro sting - all four
 // consume an identical-length chunk before their body starts, which is exactly
@@ -780,6 +804,9 @@ static void hooked_add_layer(void* group, void* core, int index,
     InterlockedExchange(&g_adding_ours, 0);
 }
 
+// --------------------------------------------------------------------
+// install
+// --------------------------------------------------------------------
 BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(mod);
