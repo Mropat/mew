@@ -6,11 +6,11 @@
 //
 // Everything else here exists to answer questions about alignment, and those
 // questions took a while to answer, so it is kept rather than deleted. Build
-// with -DMEWBUNGA_TRACE and it writes mod_logs/mewbunga.log: what was queued,
+// with -DLEGENDOFBUNGA_TRACE and it writes mod_logs/legendofbunga.log: what was queued,
 // where each stem is, when the loop hands over, and what every cat's turn
 // decided.
 
-#ifdef MEWBUNGA_TRACE
+#ifdef LEGENDOFBUNGA_TRACE
 
 static FILE* g_log;
 
@@ -21,7 +21,7 @@ static void trace_open(void) {
     if (!slash) return;
     lstrcpyA(slash + 1, "mod_logs");
     CreateDirectoryA(path, NULL);
-    lstrcatA(path, "\\mewbunga.log");
+    lstrcatA(path, "\\legendofbunga.log");
     g_log = fopen(path, "w");
 }
 

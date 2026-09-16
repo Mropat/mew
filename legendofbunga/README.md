@@ -7,7 +7,7 @@ play the radio version of its song, "Mom I Really Hate You". It does not. This
 mod makes it true - and a cat that drops to 0 mid-turn, by Stoopzerk or a
 concussion, hears it change while it is still standing there.
 
-Built as `mewbunga.dll`, keeping the naming of the other mods in this repo.
+Built as `legendofbunga.dll`, keeping the naming of the other mods in this repo.
 
 The legend is more grounded than it sounds. `audio/music/radio.gon` maps every
 zone's instrumental to a vocal radio counterpart, and lists

@@ -257,7 +257,7 @@ static void force_layers(unsigned char* group, int which) {
 
     const unsigned long now = GetTickCount();
 
-#ifdef MEWBUNGA_TRACE
+#ifdef LEGENDOFBUNGA_TRACE
     static unsigned long s_last;
     if ((now - s_last) > 3000) {
         s_last = now;
@@ -426,7 +426,20 @@ static void hooked_pull(void* self, void* out) {
             // that much of the count-in already behind it. Computed from the
             // position rather than triggered on a deadline, so how often we
             // get to look does not matter.
-            if (si == g_live && !g_armed) {
+            // If there is no second copy, fall back to splicing this one at
+            // the loop point - the behaviour before the ping-pong existed. The
+            // seam is audible, but the stem stays on the Bunga grid, which is
+            // the thing that must not be lost. Without this a missing second
+            // layer would let the live one run into its own 203.051s loop and
+            // drift 8.765s out, silently.
+            if (si == g_live && !g_stem[si ^ 1].stream && st->pos >= BODY_SAMPLES) {
+                st->skip_req = SKIP_SAMPLES;
+                st->pos      = 0;
+                InterlockedExchange(&st->realign, 1);
+                say("no second copy - splicing copy %d at the loop point", si);
+            }
+
+            if (si == g_live && !g_armed && g_stem[si ^ 1].stream) {
                 const long long remaining = BODY_SAMPLES - st->pos;
 
                 // Lands exactly on the seam, never a bar either side. Delaying it blended
@@ -620,7 +633,7 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     // Mewjector passes 0 and its length disassembler gets it right. It is also the
     // only way these sites can be shared with another mod.
     if (!hookapi_init()) {
-        say("mewbunga: Mewjector not found - not installing "
+        say("legendofbunga: Mewjector not found - not installing "
             "(this mod needs its hook chaining, and its steal lengths)");
         return TRUE;
     }
@@ -630,9 +643,9 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     if (bad >= 0) {
         // The one thing a user needs to know, so it goes where they will look.
         if (g_mj.Log)
-            g_mj.Log("mewbunga", "not installing: %s (rva 0x%x) does not match this build",
+            g_mj.Log("legendofbunga", "not installing: %s (rva 0x%x) does not match this build",
                      SITES[bad].name, SITES[bad].rva);
-        say("mewbunga: site %s (rva 0x%x) does not match this build - not installing",
+        say("legendofbunga: site %s (rva 0x%x) does not match this build - not installing",
             SITES[bad].name, SITES[bad].rva);
         return TRUE;
     }
@@ -642,23 +655,23 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     g_rewind = (RewindFn)g_at[S_DECODER_REWIND];
 
     g_next = (QueueFn)install_hook(SITES[S_QUEUECHUNK].rva, g_at[S_QUEUECHUNK], 24,
-                                   (const void*)&hooked_queue, "mewbunga");
+                                   (const void*)&hooked_queue, "legendofbunga");
     g_next_add = (AddLayerFn)install_hook(SITES[S_ADD_LAYER].rva, g_at[S_ADD_LAYER], 24,
-                                          (const void*)&hooked_add_layer, "mewbunga");
+                                          (const void*)&hooked_add_layer, "legendofbunga");
     g_next_pull = (PullFn)install_hook(SITES[S_STREAM_PULL].rva, g_at[S_STREAM_PULL], 24,
-                                       (const void*)&hooked_pull, "mewbunga");
+                                       (const void*)&hooked_pull, "legendofbunga");
     g_next_update = (UpdateFn)install_hook(SITES[S_MLMP_UPDATE].rva, g_at[S_MLMP_UPDATE], 24,
-                                           (const void*)&hooked_update, "mewbunga");
+                                           (const void*)&hooked_update, "legendofbunga");
     g_next_endturn = (EndTurnFn)install_hook(SITES[S_ENDTURN].rva, g_at[S_ENDTURN], 24,
-                                             (const void*)&hooked_endturn, "mewbunga");
+                                             (const void*)&hooked_endturn, "legendofbunga");
     g_next_die     = (DieFn)install_hook(SITES[S_DIE].rva, g_at[S_DIE], 24,
-                                         (const void*)&hooked_die, "mewbunga");
+                                         (const void*)&hooked_die, "legendofbunga");
     g_next_turn = (TurnFn)install_hook(SITES[S_BEGINTURN].rva, g_at[S_BEGINTURN], 24,
-                                       (const void*)&hooked_turn, "mewbunga");
+                                       (const void*)&hooked_turn, "legendofbunga");
     if (g_mj.Log)
-        g_mj.Log("mewbunga", "the Lord Bunga radio version: %s",
+        g_mj.Log("legendofbunga", "the Lord Bunga radio version: %s",
                  g_next ? "installed" : "FAILED to install");
-    say("mewbunga: queue=%s turn=%s  update=%s  (player cats at INT <= %d)",
+    say("legendofbunga: queue=%s turn=%s  update=%s  (player cats at INT <= %d)",
         g_next ? "hooked" : "FAILED", g_next_turn ? "hooked" : "FAILED",
         g_next_update ? "hooked" : "FAILED", RADIO_INT_THRESHOLD);
     return TRUE;
