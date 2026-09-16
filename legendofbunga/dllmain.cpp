@@ -97,9 +97,8 @@ static bool is_radio_cat(void* self) {
     return *(const int*)((const char*)self + OFF_INT) <= RADIO_INT_THRESHOLD;
 }
 
-// Layers live in a std::vector<Layer>, 0x30 stride, reached through the
-// component's group: begin at +0x00, end at +0x08. Read fresh every frame -
-// a growing vector moves its elements, so a cached Layer pointer goes stale.
+// The joke belongs to one fight, so everything is gated on being in the ice
+// age - Lord Bunga's zone, and the one the radio version is counterpart to.
 static volatile long g_in_iceage;
 
 // Our track is the second chunk of our layer: [intro, radio]. Recorded as
@@ -131,14 +130,6 @@ static volatile int g_want = -1;
 // window is what makes holding the pointer safe.
 static void* volatile g_acting;
 
-// Set the gains every frame, after the game's own update.
-//
-// Writing the layer TARGET loses: something re-asserts targets almost every
-// frame, and on the one occasion it does not, the forced value surfaces later
-// over the reward screen. Current is what the mixer uses, and this runs after
-// the ramp that would otherwise pull it back.
-//
-// Self-limiting: it only ever redirects a fight the game is already scoring.
 static char           g_intro_path[128];  // the zone's intro sting, seen as it is queued
 static void* volatile g_stream_battle;
 static void* volatile g_stream_boss;
@@ -153,13 +144,9 @@ static void* volatile g_stream_boss;
 static double        g_mix;
 static unsigned long g_mix_tick;
 
-// Defined with the stem state below; declared here because the gain override
-// refuses to act unless the stem is demonstrably producing audio.
-extern volatile long g_block;   // frames per decode, 0 until the first is seen
-extern volatile long g_pulls;
-extern volatile long g_pulls_any;
-extern long          g_skip_left;
-extern long long     g_pos;   // defined with the stem state below
+volatile long g_block;      // frames a single decode yields, 0 until seen
+volatile long g_pulls;      // blocks our stems have produced
+volatile long g_pulls_any;  // blocks ANY stream produced through this hook
 
 // Trim the radio version into a stem of the Bunga theme: drop its two-bar
 // count-in and its four-bar tail, and loop what remains on the INSTRUMENTAL's
@@ -172,10 +159,6 @@ extern long long     g_pos;   // defined with the stem state below
 
 // OnFinish, at [chunk+8]: 0 advance, 1 loop in place, 2 advance-or-loop. Our
 // layers are [intro, radio], matching the shape the game gives its own.
-
-volatile long        g_block;          // frames a single decode yields
-volatile long        g_pulls;          // blocks our stems have produced
-volatile long        g_pulls_any;      // blocks ANY stream produced through this hook
 
 // Two copies of the radio version, taking turns, so the loop seam can be
 // hidden inside the radio track itself - the Bunga theme has a male vocal, so
@@ -233,6 +216,18 @@ static int stem_of(void* stream) {
 // --------------------------------------------------------------------
 // per-frame: gains, the switch, and the loop handover
 // --------------------------------------------------------------------
+// Set the gains every frame, after the game's own update.
+//
+// Writing the layer TARGET loses: something re-asserts targets almost every
+// frame, and on the one occasion it does not, the forced value surfaces later
+// over the reward screen. Current is what the mixer uses, and this runs after
+// the ramp that would otherwise pull it back.
+//
+// Layers live in a std::vector<Layer>, 0x30 stride, reached through the group:
+// begin at +0x00, end at +0x08. Read fresh every frame - a growing vector
+// moves its elements, so a cached Layer pointer goes stale.
+//
+// Self-limiting: it only ever redirects a fight the game is already scoring.
 static void force_layers(unsigned char* group, int which) {
     (void)which;   // only used by the trace build
     unsigned char* begin = *(unsigned char**)(group + 0x00);
@@ -420,12 +415,6 @@ static void hooked_pull(void* self, void* out) {
             InterlockedIncrement(&g_pulls);
             st->pos += got;
 
-            // Prime the other copy so it reaches the downbeat exactly as this
-            // one runs out of body. It needs SKIP_SAMPLES of count-in to get
-            // there, and there are (BODY - pos) samples left, so it starts
-            // that much of the count-in already behind it. Computed from the
-            // position rather than triggered on a deadline, so how often we
-            // get to look does not matter.
             // If there is no second copy, fall back to splicing this one at
             // the loop point - the behaviour before the ping-pong existed. The
             // seam is audible, but the stem stays on the Bunga grid, which is
@@ -439,6 +428,12 @@ static void hooked_pull(void* self, void* out) {
                 say("no second copy - splicing copy %d at the loop point", si);
             }
 
+            // Prime the other copy so it reaches the downbeat exactly as this
+            // one runs out of body: it needs SKIP_SAMPLES of count-in, and
+            // there are (BODY - pos) samples left, so it starts that much of
+            // the count-in already behind it. Computed from the position
+            // rather than triggered on a deadline, so how often we get to look
+            // does not matter.
             if (si == g_live && !g_armed && g_stem[si ^ 1].stream) {
                 const long long remaining = BODY_SAMPLES - st->pos;
 
