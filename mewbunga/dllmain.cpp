@@ -257,7 +257,6 @@ static void* volatile g_acting;
 // that is an observation about two zones, not a promise, and a set with a
 // missing slot would shift it. Matching on the stream pointer cannot drift.
 static char           g_intro_path[128];  // the zone's intro sting, seen as it is queued
-static void* volatile g_stream_radio;    // the layer that carries the radio version
 static void* volatile g_stream_battle;
 static void* volatile g_stream_boss;
 
@@ -283,77 +282,6 @@ extern volatile long g_pulls;
 extern volatile long g_pulls_any;
 extern long          g_skip_left;
 extern long long     g_pos;   // defined with the stem state below
-
-static void force_layers(unsigned char* group, int which) {
-    (void)which;   // only used by the trace build
-    unsigned char* begin = *(unsigned char**)(group + 0x00);
-    unsigned char* end   = *(unsigned char**)(group + 0x08);
-    if (!begin || !end || end <= begin) return;
-    const size_t count = (size_t)(end - begin) / LAYER_STRIDE;
-    if (count < 2 || count > 8) return;
-
-    int radio = -1, boss = -1;
-    for (size_t i = 0; i < count; i++) {
-        void* st = *(void**)(begin + i * LAYER_STRIDE);
-        if (st && st == g_stream_radio)  radio  = (int)i;
-        if (st && st == g_stream_boss)   boss   = (int)i;
-    }
-    if (radio < 0) return;               // not the set we swapped into
-
-    // Only the boss layer. The legend is about the Lord Bunga fight, not about
-    // ice age skirmishes, so an ordinary battle in the zone is left alone.
-    double* t_bos = boss >= 0 ? (double*)(begin + boss * LAYER_STRIDE + OFF_GAIN_TGT) : 0;
-    const bool fighting = g_in_iceage && t_bos && *t_bos > 0.0;
-
-    const unsigned long now = GetTickCount();
-
-#ifdef MEWBUNGA_TRACE
-    static unsigned long s_last;
-    if ((now - s_last) > 3000) {
-        s_last = now;
-        const unsigned char* st = (const unsigned char*)g_stream_radio;
-        say("layers[%d]: radio=%d boss=%d fight=%d mix=%.2f pos=%.1fs pulls=%ld/%ld "
-            "skip=%ld want=%d chunk=%d/%d",
-            which, radio, boss, (int)fighting, g_mix,
-            (double)g_pos / 44100.0, g_pulls, g_pulls_any, g_skip_left, g_want,
-            st ? *(const int*)(st + 0x188) : -1,
-            st ? *(const int*)(st + 0x18c) : -1);
-    }
-#endif
-
-    const double dt = g_mix_tick ? (double)(now - g_mix_tick) : 0.0;
-    g_mix_tick = now;
-    // Ask the acting cat again, every frame. This is what makes a mid-turn
-    // change audible at once; between turns there is nobody to ask and the
-    // last verdict stands, so the music does not flap on enemy turns.
-    void* acting = g_acting;
-    if (acting) g_want = is_radio_cat(acting) ? LAYER_BOSS : LAYER_BATTLE;
-
-    const double want = (fighting && g_want == LAYER_BOSS) ? 1.0 : 0.0;
-
-    if (dt > 0.0 && dt < 500.0) {        // ignore a hitch or a loading pause
-        const double step = dt / FADE_MS;
-        if (g_mix < want) { g_mix += step; if (g_mix > want) g_mix = want; }
-        else if (g_mix > want) { g_mix -= step; if (g_mix < want) g_mix = want; }
-    }
-    if (g_mix <= 0.0) return;            // released: the game's own gains stand
-
-    // Never silence the game's music in favour of a layer that is not actually
-    // producing audio. Entering the Bunga room once did exactly that - our
-    // stem was added and faded up while decoding nothing, and the fight played
-    // with ambience only. If the stem is not alive, this does nothing at all.
-    if (g_pulls <= 0) {
-        *(double*)(begin + radio * LAYER_STRIDE + OFF_GAIN_CUR) = 0.0;
-        return;
-    }
-
-    // Assign, do not nudge. Only the fight layer the game actually has up is
-    // damped - raising the other one would put two layers on at once.
-    *(double*)(begin + radio * LAYER_STRIDE + OFF_GAIN_CUR) = g_mix;
-    if (t_bos && *t_bos > 0.0)
-        *(double*)(begin + boss * LAYER_STRIDE + OFF_GAIN_CUR) = 1.0 - g_mix;
-
-}
 
 // Trim the radio version into a stem of the Bunga theme.
 //
@@ -386,84 +314,184 @@ static void force_layers(unsigned char* group, int which) {
 //
 #define ONFINISH_LOOP  1
 
-volatile long        g_block;          // samples a single decode block yields
-static long          g_lag;            // how late our layer started, in samples
-static long long     g_skipped;        // samples discarded since the last realign
-static volatile long g_converged;      // the one start-lag correction has been made
+volatile long        g_block;          // frames a single decode yields
+volatile long        g_pulls;          // blocks our stems have produced
+volatile long        g_pulls_any;      // blocks ANY stream produced through this hook
+
+// Two copies of the radio version, taking turns.
+//
+// The loop seam cannot be hidden behind the Bunga layer - that track has a
+// male vocal of its own, so ducking to it swaps singers instead of covering a
+// splice. It has to be hidden inside the radio version itself, which is what
+// its 5.867s tail is for: the live copy runs on past the end of the body into
+// its real ending while the other starts the body afresh, and the two are
+// crossfaded. Same recording, same bar, no splice to hear.
+//
+// A stem's position is measured from the START OF THE BODY, so it is negative
+// while the count-in is playing and crosses zero exactly on the downbeat.
+typedef struct {
+    void*         stream;
+    long          skip_left;   // samples still to discard
+    long          skip_req;    // what to skip after the next rewind
+    long long     skipped;     // discarded since that rewind
+    long long     pos;         // body position: negative during the count-in
+    volatile long realign;     // rewind and re-skip on the next pull
+} Stem;
+
+static Stem          g_stem[2];
+static volatile long g_live;           // which stem is carrying the body
+static volatile long g_armed;          // the other one is primed for the seam
+static double        g_xf;             // handover: 0 = live, 1 = the other
+static unsigned long g_xf_tick;        // when the handover began, 0 when idle
+
+// A bar, in milliseconds: four beats at 164.10 BPM.
+#define XF_MS          1463
+
+// One bar at 164.10 BPM - four beats, 1.463s. Long enough to be a crossfade
+// rather than a cut, short enough to stay inside the 5.867s tail.
+#define BAR_SAMPLES    64507
 
 // The game's layers decode a second at a time, so comparing their produced
-// counts against ours is only good to about a second. Corrections smaller than
-// that are noise, not lag.
+// counts with ours is only good to about a second. Corrections finer than that
+// are noise, and this only ever skips FORWARD - so it fires once, for a real
+// start lag, and never again.
 #define CONVERGE_FLOOR 44100
+static volatile long g_converged;
 
-// Keep converging instead of measuring once.
-//
-// Every stream counts what it has produced at +0x1a0, and they all produce in
-// lockstep - the game's four agree to the sample. So once we have discarded S
-// samples and started `lag` late, (ours - boss) settles at exactly S - lag,
-// and stays there. The shortfall IS the lag, readable at any moment rather
-// than at one unlucky one.
-//
-// Measuring it once at the realign could not work: the counters move in whole
-// one-second steps, so a single reading depends on where in the block cycle it
-// was taken - which is why the same code reported "3.000s late" and "0.000s
-// late" in consecutive sets, and why the result was a second out either way.
-//
-// Correcting only ever discards more, never less, so it approaches from behind
-// and cannot overshoot. It runs only while the layer is inaudible, so the jump
-// is never heard.
-static void converge(void* self) {
-    if (!g_stream_boss || g_skip_left > 0 || g_block <= 0) return;
-    if (g_mix > 0.0 || g_converged) return;        // audible, or already done
+static void converge(void* self, Stem* st) {
+    if (!g_stream_boss || st->skip_left > 0 || g_block <= 0) return;
+    if (g_mix > 0.0 || g_converged) return;
     const long long theirs = *(const long long*)((const unsigned char*)g_stream_boss + 0x1a0);
     const long long mine   = *(const long long*)((const unsigned char*)self + 0x1a0);
-    const long long drift  = (mine - theirs) - g_skipped;   // negative = we are behind
-
-    // The threshold is set by how noisy the comparison is, NOT by our block
-    // size. The game's streams decode a second at a time and ours decodes a
-    // tenth, so the two counters are never sampled at the same point in their
-    // cycles and the difference carries up to a second of slop. Tying the
-    // threshold to our block instead made this fire ten times as readily, and
-    // since it only ever skips FORWARD it walked us into the middle of the
-    // song one correction at a time.
-    //
-    // Firing once is also the point: a genuine start lag is fixed by a single
-    // correction. Anything that keeps needing them is measurement noise.
+    const long long drift  = (mine - theirs) - st->skipped;
     if (drift > -(long long)CONVERGE_FLOOR) return;
     const long blocks = (long)((-drift) / CONVERGE_FLOOR);
-    g_skip_left = blocks * CONVERGE_FLOOR;
+    st->skip_left = blocks * CONVERGE_FLOOR;
     g_converged = 1;
     say("converging once: %.3fs behind, discarding %ld more second(s)",
         (double)(-drift) / 44100.0, blocks);
 }
 
-// The last hundred milliseconds.
-//
-// Discarding can only land on a block boundary, and a block is a whole second:
-// the count-in is 127,808 samples, three blocks is 132,300, so the trim always
-// overshoots by 4,492 - about 102ms ahead of the fight music, every time.
-//
-// That last stretch is taken off the other end instead. The stream's voice can
-// be paused, so it is held back by exactly the overshoot and released a frame
-// later: granularity of about 16ms rather than 1000ms. Pausing happens on the
-// audio thread the moment the skip finishes, and releasing from the per-frame
-// update, which is what makes the timing fine enough to matter.
+static int stem_of(void* stream) {
+    if (stream && stream == g_stem[0].stream) return 0;
+    if (stream && stream == g_stem[1].stream) return 1;
+    return -1;
+}
 
-volatile long        g_pulls;          // blocks our stem has actually produced
-volatile long        g_pulls_any;      // blocks ANY stream has produced through this hook
-long                 g_skip_left;      // samples still to discard
-long long            g_pos;            // samples of body played since alignment
-static volatile long g_realign;        // rewind and re-trim at the next pull
-static long long     g_carry;          // overshoot past the loop point, preserved
 
-// How much the stream decodes per pull, in frames. QueueSongChunk sets it from
-// the file's sample rate, which is why a block is exactly one second - it is a
-// field on our own stream, not a property of the decoder or the mixer.
-//
-// Lowering it for the last part of a skip lets the skip end on any sample we
-// like: ask for exactly the frames still wanted, get exactly those, restore
-// the rate afterwards. That removes the block quantisation entirely - the
-// ~102ms residue, and the ragged splice at the loop point with it.
+static void force_layers(unsigned char* group, int which) {
+    (void)which;   // only used by the trace build
+    unsigned char* begin = *(unsigned char**)(group + 0x00);
+    unsigned char* end   = *(unsigned char**)(group + 0x08);
+    if (!begin || !end || end <= begin) return;
+    const size_t count = (size_t)(end - begin) / LAYER_STRIDE;
+    if (count < 2 || count > 8) return;
+
+    int mine[2] = { -1, -1 }, boss = -1;
+    for (size_t i = 0; i < count; i++) {
+        void* ls = *(void**)(begin + i * LAYER_STRIDE);
+        if (ls && ls == g_stem[0].stream) mine[0] = (int)i;
+        if (ls && ls == g_stem[1].stream) mine[1] = (int)i;
+        if (ls && ls == g_stream_boss)    boss    = (int)i;
+    }
+    if (mine[0] < 0) return;             // not the set we added to
+
+    // Only the boss layer. The legend is about the Lord Bunga fight, not about
+    // ice age skirmishes, so an ordinary battle in the zone is left alone.
+    double* t_bos = boss >= 0 ? (double*)(begin + boss * LAYER_STRIDE + OFF_GAIN_TGT) : 0;
+    const bool fighting = g_in_iceage && t_bos && *t_bos > 0.0;
+
+    const unsigned long now = GetTickCount();
+
+#ifdef MEWBUNGA_TRACE
+    static unsigned long s_last;
+    if ((now - s_last) > 3000) {
+        s_last = now;
+        say("layers[%d]: live=%d (layer %d) other=%d boss=%d fight=%d mix=%.2f "
+            "xf=%.2f pos=%.1fs/%.1fs pulls=%ld/%ld want=%d",
+            which, g_live, mine[g_live], mine[g_live ^ 1], boss, (int)fighting,
+            g_mix, g_xf,
+            (double)g_stem[g_live].pos / 44100.0,
+            (double)g_stem[g_live ^ 1].pos / 44100.0,
+            g_pulls, g_pulls_any, g_want);
+    }
+#endif
+
+    const double dt = g_mix_tick ? (double)(now - g_mix_tick) : 0.0;
+    g_mix_tick = now;
+    // Ask the acting cat again, every frame. This is what makes a mid-turn
+    // change audible at once; between turns there is nobody to ask and the
+    // last verdict stands, so the music does not flap on enemy turns.
+    void* acting = g_acting;
+    if (acting) g_want = is_radio_cat(acting) ? LAYER_BOSS : LAYER_BATTLE;
+
+    const double want = (fighting && g_want == LAYER_BOSS) ? 1.0 : 0.0;
+
+    if (dt > 0.0 && dt < 500.0) {        // ignore a hitch or a loading pause
+        const double step = dt / FADE_MS;
+        if (g_mix < want) { g_mix += step; if (g_mix > want) g_mix = want; }
+        else if (g_mix > want) { g_mix -= step; if (g_mix < want) g_mix = want; }
+    }
+    if (g_mix <= 0.0) return;            // released: the game's own gains stand
+
+    // Never silence the game's music in favour of a layer that is not actually
+    // producing audio. Entering the Bunga room once did exactly that - our
+    // stem was added and faded up while decoding nothing, and the fight played
+    // with ambience only. If the stem is not alive, this does nothing at all.
+    if (g_pulls <= 0) {
+        *(double*)(begin + mine[0] * LAYER_STRIDE + OFF_GAIN_CUR) = 0.0;
+        if (mine[1] >= 0)
+            *(double*)(begin + mine[1] * LAYER_STRIDE + OFF_GAIN_CUR) = 0.0;
+        return;
+    }
+
+    // Hand over across the seam.
+    //
+    // The live copy runs past the end of the body into its tail - the song's
+    // real ending, five and a half seconds of it - while the other one starts
+    // the body again from the downbeat. Crossfading between them over a bar
+    // means the join is two takes of the same music at the same point, so
+    // there is no splice to hear. Nothing is borrowed from the Bunga layer,
+    // which has a singer of its own.
+    const int live = g_live, other = live ^ 1;
+    if (mine[other] >= 0) {
+        const long long past = g_stem[live].pos - BODY_SAMPLES;
+
+        // Run the crossfade off the frame clock, not off the stem's position.
+        //
+        // Position advances one block at a time - one whole second - so a fade
+        // a bar long got one or two updates across its entire length: a step
+        // down to about a third, then a jump. Which is precisely what it
+        // sounded like. The position decides WHEN the handover starts; how it
+        // is shaped is a matter for the frames.
+        if (past >= 0 && g_xf_tick == 0) {
+            g_xf_tick = now ? now : 1;
+            say("handover: blending the tail into the fresh start over %dms", XF_MS);
+        }
+        if (g_xf_tick) {
+            g_xf = (double)(now - g_xf_tick) / (double)XF_MS;
+            if (g_xf >= 1.0) {                  // handover complete: swap roles
+                InterlockedExchange(&g_live, other);
+                InterlockedExchange(&g_armed, 0);
+                g_xf = 0.0;
+                g_xf_tick = 0;
+                say("handed the body over to copy %d", other);
+            }
+        } else {
+            g_xf = 0.0;
+        }
+    }
+
+    // Assign, do not nudge. Only the fight layer the game actually has up is
+    // damped - raising the other one would put two layers on at once.
+    *(double*)(begin + mine[live] * LAYER_STRIDE + OFF_GAIN_CUR) = g_mix * (1.0 - g_xf);
+    if (mine[other] >= 0)
+        *(double*)(begin + mine[other] * LAYER_STRIDE + OFF_GAIN_CUR) = g_mix * g_xf;
+    if (t_bos && *t_bos > 0.0)
+        *(double*)(begin + boss * LAYER_STRIDE + OFF_GAIN_CUR) = 1.0 - g_mix;
+
+}
+
 #define OFF_BLOCK_FRAMES 0x198
 
 #define OFF_CHUNK_VEC   0x170
@@ -483,133 +511,91 @@ static RewindFn g_rewind;
 // That is legitimate (a hook may call through as often as it likes) but a
 // higher-priority observer counting calls will see more than the game made.
 static void hooked_pull(void* self, void* out) {
-    const bool ours = self && self == g_stream_radio
-                   && stream_chunk(self) == g_chunk_radio;
-    InterlockedIncrement(&g_pulls_any);   // is this hook on the decode path at all?
+    InterlockedIncrement(&g_pulls_any);
+    const int si = stem_of(self);
+    if (si < 0 || stream_chunk(self) != g_chunk_radio) { g_next_pull(self, out); return; }
+    Stem* st = &g_stem[si];
 
-    if (ours && InterlockedExchange(&g_realign, 0)) {
+    if (InterlockedExchange(&st->realign, 0)) {
         // Chunk layout read out of the pull itself: the chunk vector is at
-        // stream+0x170 with a 0x10 stride, the live index at stream+0x188, and
-        // the decoder is the first field of the chunk.
+        // stream+0x170 with a 0x10 stride, the live index at stream+0x188,
+        // and the decoder is the first field of the chunk.
         unsigned char* vec = *(unsigned char**)((unsigned char*)self + 0x170);
         const int idx = *(const int*)((unsigned char*)self + 0x188);
         if (vec && idx >= 0 && idx < 64) {
             void* decoder = *(void**)(vec + (size_t)idx * 0x10);
             if (decoder && g_rewind) {
                 g_rewind(decoder);
-
-                // How late our layer started, in samples.
-                //
-                // Each stream counts what it has produced at +0x1a0, and the
-                // game's own four agree to the sample - so this is a precise
-                // instrument, not the noisy one I took it for. Our layer joins
-                // a block late even when added inside the builder, and the
-                // skip has to make that up: aligning means skipping the
-                // count-in PLUS however late we were.
-                //
-                // Bounded, because a reading taken before our stream has
-                // produced anything would be the boss layer's entire history.
-                long lag = 0;
-                if (g_stream_boss) {
-                    const long long theirs = *(const long long*)((const unsigned char*)g_stream_boss + 0x1a0);
-                    const long long mine   = *(const long long*)((const unsigned char*)self + 0x1a0);
-                    const long long d = theirs - mine;
-                    if (d > 0 && d <= 4 * 44100) lag = (long)d;
-                }
-                g_lag = lag;
-
-                // Skip a FIXED number of blocks - the same count every time.
-                //
-                // This used to add a correction for how late our layer joined,
-                // measured as the difference between the boss layer's produced
-                // -sample counter and ours. Two things make that measurement
-                // unusable. It counts samples DECODED, which runs ahead of
-                // playback by whatever is buffered, so it is not a position.
-                // And it moves in whole blocks - one second each - so it is
-                // quantised far coarser than the error it was meant to fix.
-                //
-                // Rounding a varying total to whole blocks then lands on a
-                // different block from run to run, which is why the alignment
-                // was excellent one night and half a second out the next. It
-                // was never deterministic; we simply got a good roll.
-                //
-                // Skipping a constant instead gives a constant result: always
-                // the same block count, always the same ~100ms, every launch.
-                g_skip_left = (long)SKIP_SAMPLES + lag;
-                g_skipped = 0;
-                g_converged = 0;
+                st->skip_left = st->skip_req;
+                st->skipped   = 0;
             }
         }
     }
 
-    // Discard, a few blocks at a time. There is no seek to call, so skipping
-    // means decoding and throwing away - and 2.9s of vorbis decode inside one
-    // call is a good way to miss an audio deadline. Each call overwrites the
-    // same output block, so nothing discarded here reaches the mixer.
-    if (ours && g_skip_left > 0) {
-        for (int i = 0; i < SKIP_PER_PULL && g_skip_left > 0; i++) {
+    // Discard, a few blocks at a time - decoding 2.9s inside one call is a
+    // good way to miss an audio deadline. Each call overwrites the same output
+    // block, so nothing discarded here reaches the mixer.
+    if (st->skip_left > 0) {
+        for (int i = 0; i < SKIP_PER_PULL && st->skip_left > 0; i++) {
             g_next_pull(self, out);
             const int got = *(const int*)((const unsigned char*)out + 8);
-            if (got <= 0) { g_skip_left = 0; break; }   // chunk ended: stop
-
-            // Blocks are indivisible, so the skip can only ever land on a
-            // block boundary - and always discarding until the target is
-            // passed lands on the boundary AFTER it, every time, leaving us
-            // that much ahead of the fight music.
-            //
-            // Once the block size is known, aim at the NEAREST boundary
-            // instead. That halves the worst case and, more importantly, lets
-            // the error fall either side of the mark rather than always ahead.
-            if (g_block <= 0 && got > 0) {
-                g_block = got;
-                say("block=%ld frames; we started %.3fs late; skipping %ld exactly",
-                    (long)got, (double)g_lag / 44100.0, g_skip_left + got);
-            }
-            g_skip_left -= got;
-            g_skipped += got;
+            if (got <= 0) { st->skip_left = 0; break; }
+            if (g_block <= 0) g_block = got;
+            st->skip_left -= got;
+            st->skipped   += got;
 
             // Ask for exactly the remainder, so the skip ends on the sample we
-            // want rather than on the next second boundary.
-            if (g_skip_left > 0 && g_skip_left < g_block)
-                *(int*)((unsigned char*)self + OFF_BLOCK_FRAMES) = (int)g_skip_left;
+            // want rather than on the next block boundary.
+            if (st->skip_left > 0 && st->skip_left < g_block)
+                *(int*)((unsigned char*)self + OFF_BLOCK_FRAMES) = (int)st->skip_left;
         }
-        // Back to the stream's own block size for ordinary playback.
         if (g_block > 0)
             *(int*)((unsigned char*)self + OFF_BLOCK_FRAMES) = (int)g_block;
 
-        if (g_skip_left <= 0) {
-            // Where the body actually starts, given we landed on a block
-            // boundary rather than exactly on the count-in. Carrying the
-            // previous lap's overshoot keeps the loop period exact.
-            g_pos = g_carry;          // the skip is exact now; no overshoot to carry
-            g_carry = 0;
-            g_skip_left = 0;
-
-            // The last ~102ms is left alone.
-            //
-            // Two attempts to shave it both failed: pausing the voice from the
-            // pull crashed (that is the audio thread, mid-decode on the very
-            // stream being stopped), and pausing it from the game thread left
-            // the stream dead - 0xb51670 does more than toggle a voice, and
-            // resuming does not restart the decode task it tears down.
-            //
-            // A tenth of a second, constant and in the same direction every
-            // launch, is a better place to stop than a third attempt.
+        if (st->skip_left <= 0) {
+            st->skip_left = 0;
+            st->pos = st->skipped - SKIP_SAMPLES;   // negative while counting in
         }
     }
 
     g_next_pull(self, out);
 
-    if (ours) converge(self);
+    if (si == g_live) converge(self, st);
 
-    if (ours && g_skip_left <= 0) {
+    if (st->skip_left <= 0) {
         const int got = *(const int*)((const unsigned char*)out + 8);
         if (got > 0) {
             InterlockedIncrement(&g_pulls);
-            g_pos += got;
-            if (g_pos >= BODY_SAMPLES) {            // end of the body: loop it
-                g_carry = g_pos - BODY_SAMPLES;
-                InterlockedExchange(&g_realign, 1);
+            st->pos += got;
+
+            // Prime the other copy so it reaches the downbeat exactly as this
+            // one runs out of body. It needs SKIP_SAMPLES of count-in to get
+            // there, and there are (BODY - pos) samples left, so it starts
+            // that much of the count-in already behind it. Computed from the
+            // position rather than triggered on a deadline, so how often we
+            // get to look does not matter.
+            if (si == g_live && !g_armed) {
+                const long long remaining = BODY_SAMPLES - st->pos;
+
+                // Lands exactly on the seam, never a bar either side.
+                //
+                // Delaying it by a bar made the blend sit better but stretched
+                // the radio's loop a bar longer than the Bunga song's, and the
+                // grid is the whole point: every cat stays on the same beat
+                // and the swap between singers reads as one song with two
+                // voices. Nothing is allowed to move that. The overlap is the
+                // outgoing tail against the incoming's fresh start - both are
+                // valid continuations of the same bar, which is what makes the
+                // blend possible at all.
+                if (remaining <= SKIP_SAMPLES && remaining > 0) {
+                    Stem* nx = &g_stem[si ^ 1];
+                    nx->skip_req = (long)(SKIP_SAMPLES - remaining);
+                    InterlockedExchange(&nx->realign, 1);
+                    InterlockedExchange(&g_armed, 1);
+                    say("priming the other copy: %lld samples of body left, "
+                        "skipping %ld of its count-in",
+                        remaining, nx->skip_req);
+                }
             }
         }
     }
@@ -656,14 +642,17 @@ static void hooked_queue(void* self, void* path, int onfinish) {
     if (p && ends_with(p, "_intro.ogg") && strlen(p) < sizeof(g_intro_path)) {
         lstrcpynA(g_intro_path, p, sizeof(g_intro_path));   // the zone's own sting
     }
-    if (p && strcmp(p, RADIO_TRACK) == 0) {       // our own layer, starting up
-        g_stream_radio = self;
+    if (p && strcmp(p, RADIO_TRACK) == 0) {       // one of our two copies
+        const int si = g_stem[0].stream ? 1 : 0;
+        g_stem[si].stream   = self;
+        g_stem[si].skip_req = SKIP_SAMPLES;        // trim the count-in
+        g_stem[si].skipped  = 0;
+        g_stem[si].pos      = 0;
+        InterlockedExchange(&g_stem[si].realign, 1);
         // Our chunk's index is however many are already queued on this stream
         // - 1 when it follows an intro, 0 without one.
         g_chunk_radio = *(const int*)((const unsigned char*)self + 0x18c);
-        g_pos = 0; g_carry = 0; g_skip_left = 0;
-        InterlockedExchange(&g_realign, 1);        // trim the count-in first
-        say("our layer is streaming: %p", self);
+        say("radio copy %d is streaming: %p", si, self);
     }
     // Which zone's music is loading. Every layer path is <zone>/<name>_kind.ogg,
     // so the set that is being queued says where we are.
@@ -774,9 +763,19 @@ static void hooked_add_layer(void* group, void* core, int index,
     const Vec3 our_finishes = { &g_layer_finish[0], &g_layer_finish[n], &g_layer_finish[n] };
 
     g_want = -1; g_mix = 0.0; g_pulls = 0; g_block = 0;
-    say("adding our layer as %d, inside the builder (intro=%s)",
-        LAST_GAME_LAYER + 1, with_intro ? g_intro_path : "none");
+    // Forget the previous set's streams before adding this one's. A set is
+    // rebuilt on entering the boss room, and the slots used to fill on a
+    // first-come basis - so copy 0 stayed pointed at a dead stream from the
+    // hallway set while the new set's only layer took copy 1.
+    g_stem[0].stream = 0;
+    g_stem[1].stream = 0;
+    g_live = 0; g_armed = 0; g_xf = 0.0; g_converged = 0;
+
+    // Two copies, so one can cover the other's loop seam.
+    say("adding two radio layers as %d and %d, inside the builder (intro=%s)",
+        LAST_GAME_LAYER + 1, LAST_GAME_LAYER + 2, with_intro ? g_intro_path : "none");
     g_next_add(group, core, LAST_GAME_LAYER + 1, &our_paths, &our_finishes);
+    g_next_add(group, core, LAST_GAME_LAYER + 2, &our_paths, &our_finishes);
 
     InterlockedExchange(&g_adding_ours, 0);
 }

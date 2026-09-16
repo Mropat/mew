@@ -9,3 +9,16 @@ cpp_bytes.txt
 # working notes, not part of the mods
 .claude/
 *.res
+
+# Visual Studio
+.vs/
+*.sln
+*.slnx
+*.vcxproj
+*.vcxproj.*
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.vsidx
