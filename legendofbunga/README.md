@@ -1,6 +1,8 @@
 # The Legend of Bunga
 
-**Work in progress. Not released, not ready to ship.**
+Released: [legendofbunga-v1.0.0](https://github.com/Mropat/mew/releases/tag/legendofbunga-v1.0.0).
+Needs [Mewjector](https://github.com/githubuser508/mewjector); drop the DLL in
+`Mewgenics/mods`.
 
 There is a community legend that a cat with 0 INT makes the Lord Bunga fight
 play the radio version of its song, "Mom I Really Hate You". It does not. This
@@ -186,4 +188,3 @@ at 0 INT the mod means something, and a coin flip made it mean nothing.
 - **`force_layers` ignores a group with more than eight layers.** A music set
   is six now that this mod adds two. Another mod adding three or more would
   quietly switch this one off.
-- Not released. It wants a Nexus page, and a second pair of ears.
