@@ -1,6 +1,6 @@
 # The Legend of Bunga
 
-Released: [legendofbunga-v1.0.0](https://github.com/Mropat/mew/releases/tag/legendofbunga-v1.0.0).
+Released: [legendofbunga-v1.0.2](https://github.com/Mropat/mew/releases/tag/legendofbunga-v1.0.2).
 Needs [Mewjector](https://github.com/githubuser508/mewjector); drop the DLL in
 `Mewgenics/mods`.
 
@@ -156,12 +156,7 @@ enemy acts.
 
 ## Who hears it
 
-`is_player_cat` is a byte at `[Character + 0x489]`, so enemies are excluded -
-they take turns too, and a LordBunga has `intelligence 5` like anything else.
-INT lives at `+0x5c8` and is the live, buffed value.
-
-A player cat at or below the INT threshold gets it, and the threshold is 0 -
-the legend's own condition and nothing else. `is_player_cat` (a byte at
+A player cat with INT at or below the limit gets it. `is_player_cat` (a byte at
 `[Character + 0x489]`, written by `Character::init`) keeps enemies out; they
 take turns and have stats too, and a LordBunga has `intelligence 5` like
 anything else.
@@ -172,6 +167,96 @@ a Stoopzerk counts, and counts immediately.
 An earlier build gave every other cat a fixed random draw, so the joke would
 fire in an ordinary run without hunting for a 0 INT cat. It has been removed:
 at 0 INT the mod means something, and a coin flip made it mean nothing.
+
+### The limit
+
+`legendofbunga.ini`, written beside the DLL on first run:
+
+```ini
+[LegendOfBunga]
+IntLimit=0
+```
+
+0 is the legend's own condition, the default, and the floor. 1 to 4 widen it,
+for anyone who would rather hear the joke than wait for a 0-INT cat. 4 is the
+ceiling and the row offers nothing past it: the joke is that the stupid cat
+hears it, and a cat that is not stupid should not.
+
+It is re-read whenever a level builds its music, so an edit lands on the next
+fight rather than the next launch. The file is created with `CREATE_NEW`, so a
+version already on disk is never overwritten.
+
+## The settings row
+
+The limit is also a row in **Audio Settings**, under the last volume slider,
+and getting one there took some finding out.
+
+The screen is not data-driven - there is no settings gon anywhere in the pak.
+Four functions build the four panels in code (`0x28eee0` game, `0x291610`
+video, `0x294860` audio, `0x2938e0` the shared tooltip/status-size pair), and
+each row is a clip placed statically in `swfs/ui.swf` that
+
+```cpp
+SelectorWidget* MenuPanel::register_selector(std::string key, std::string current,
+                                             std::vector<SelectorWidget::Option>,
+                                             bool, std::function<void(std::string)>)
+```
+
+looks up by name - `key`, `key_left` and `key_right` - through `find_ui_child`
+(`0x5a100`), which returns null rather than creating anything. All 18 of those
+clips are spoken for, one per `register_selector` call site. There is no list to
+append to and no spare row to adopt.
+
+What there is instead is an engine that can make another copy of anything
+already on screen. A `glaiel::swf::MovieClip` keeps the tag list it was built
+from at `+0xd0`, and a `DynamicTextBox` keeps its `DefineEditText` at `+0x98` -
+both of them the argument their constructor was called with, which is also what
+`DefineSprite`'s and `DefineEditText`'s instantiate slots pass. So a second copy
+of a row's three pieces is two calls apiece, and the copies are independent:
+their own text, their own position, their own name.
+
+From there it is the game's own path. `DisplayObject` keeps its parent at
+`+0x38`, its name at `+0x48` as a plain `const char*`, and its transform at
+`+0x60` as six floats. The clones are parented next to the pieces they came
+from - `addChild` (`0x999b90`) refuses a child that already has a parent, which
+a fresh one does not - given a name, and moved one row on.
+
+How far "one row" is, and which of the two translation floats it is on, are
+both measured at runtime from the two rows above: the audio screen runs on a
+dead-regular 42.15 pitch and the rows differ on one axis only, so neither the
+unit nor the axis has to be guessed. There is room for about seven more rows
+below the last volume slider - Audio Settings stops at y -63.5 while Game
+Settings goes on to +269.
+
+The `std::function` is hand-built. MSVC's is 64 bytes with the callable's
+pointer at `+0x38`, counting as "local" - moved rather than stolen, and never
+freed - when that pointer is the storage itself. `register_selector`'s own
+teardown is what says so:
+
+```
+mov rcx,[rbx+0x38]   ; _Getimpl()
+cmp rcx,rbx          ; _Local()?
+call [r8+0x20]       ; _Delete_this, vtable slot 4
+```
+
+which fixes the whole layout: `_Copy`, `_Move`, `_Do_call`, `_Target_type`,
+`_Delete_this`. The game's own `combat_speed` lambda at `0x29c3f0` confirms the
+call shape - it takes `(this, std::string&&)` and does nothing but write the
+setting.
+
+Every step is checked and the mod is happy without any of it: a missing piece
+means no row, never a half-built one.
+
+### Why not settings.txt
+
+The game's own settings are not in the save database - they are
+`AppData/Roaming/Glaiel Games/Mewgenics/<id>/settings.txt`, a flat `key value`
+file, and the writer at `0x9d2f70` walks a `std::map<std::string, std::string>`
+in order and dumps it whole. A key the game has never heard of would survive a
+round trip, so the row's value could live there.
+
+It lives in the ini instead, so there is one place to look and one place to
+edit. The row writes it there when you change it.
 
 ## Known
 

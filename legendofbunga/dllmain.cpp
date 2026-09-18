@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <cstring>
+#include <cwchar>
 
 #define MOD_HOOK_PRIORITY 50
 #define MOD_REQUIRES_MEWJECTOR   // no raw patching, so no injection-shaped imports
@@ -33,13 +34,18 @@
 
 
 
-// Who hears it: player cats at or below the threshold, which is 0 - the
-// legend's own condition and nothing else. Enemies are excluded by
+// Who hears it: player cats at or below the limit. Enemies are excluded by
 // is_player_cat; they take turns and have stats too.
+//
+// The legend's own condition is INT 0, which is the default and the floor.
+// legendofbunga.ini can raise it as far as 4, for people who would rather hear
+// the joke more often than a 0-INT cat turns up.
 //
 // Read live, every frame of the acting cat's turn, so Stoopzerk or a
 // concussion is heard the moment it lands.
-#define RADIO_INT_THRESHOLD 0        // INT at or below this: always
+#define INT_LIMIT_DEFAULT 0
+#define INT_LIMIT_MAX     4
+static volatile long g_int_limit = INT_LIMIT_DEFAULT;
 #define OFF_IS_PLAYER_CAT 0x489
 
 // Character stat block, from the buff applier at 0x7d610, which does
@@ -92,10 +98,73 @@ static void make_game_string(GameString* out, const char* lit, unsigned long lon
     g_append(out, lit, n);
 }
 
+// --------------------------------------------------------------------
+// the one knob
+// --------------------------------------------------------------------
+// legendofbunga.ini, beside the DLL. Written with its default on first run so
+// there is something to find, and re-read whenever a level builds its music,
+// so an edit lands on the next fight instead of the next launch.
+//
+// It is the mod's own file rather than the game's settings.txt because that
+// one is rewritten from memory on exit: the game would keep an unknown key,
+// but it would also overwrite anything typed in while it was running.
+static wchar_t g_ini[MAX_PATH];
+
+static const char INI_TEMPLATE[] =
+    "; The Legend of Bunga\r\n"
+    ";\r\n"
+    "; Player cats with INT at or below IntLimit hear the radio version of the\r\n"
+    "; Lord Bunga song. 0 is the legend's own condition and the lowest setting;\r\n"
+    "; raise it to 1-4 to hear it without waiting for a 0-INT cat to turn up.\r\n"
+    ";\r\n"
+    "; Re-read when a level loads, so it can be edited with the game running.\r\n"
+    "\r\n"
+    "[LegendOfBunga]\r\n"
+    "IntLimit=0\r\n";
+
+static void config_init(HMODULE self) {
+    const DWORD n = GetModuleFileNameW(self, g_ini, MAX_PATH);
+    if (!n || n >= MAX_PATH) { g_ini[0] = 0; return; }
+
+    // .dll -> .ini, refusing anything whose last dot is in a directory name.
+    wchar_t* dot = wcsrchr(g_ini, L'.');
+    if (!dot || dot < wcsrchr(g_ini, L'\\') || (size_t)(dot - g_ini) + 5 > MAX_PATH) {
+        g_ini[0] = 0;
+        return;
+    }
+    dot[0] = L'.'; dot[1] = L'i'; dot[2] = L'n'; dot[3] = L'i'; dot[4] = 0;
+
+    // CREATE_NEW: never truncate one that has been edited, and no separate
+    // existence check to lose a race against.
+    HANDLE f = CreateFileW(g_ini, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        DWORD wrote = 0;
+        WriteFile(f, INI_TEMPLATE, (DWORD)(sizeof(INI_TEMPLATE) - 1), &wrote, NULL);
+        CloseHandle(f);
+    }
+}
+
+static void config_load(void) {
+    if (!g_ini[0]) return;
+
+    long v = (long)GetPrivateProfileIntW(L"LegendOfBunga", L"IntLimit",
+                                         INT_LIMIT_DEFAULT, g_ini);
+    if (v < INT_LIMIT_DEFAULT) v = INT_LIMIT_DEFAULT;
+    if (v > INT_LIMIT_MAX)     v = INT_LIMIT_MAX;
+
+    if (v != g_int_limit) {
+        say("int limit: %ld (was %ld)", v, g_int_limit);
+        InterlockedExchange(&g_int_limit, v);
+    }
+}
+
+#include "settingsrow.inc"
+
 static bool is_radio_cat(void* self) {
     if (!self) return false;
     if (!*(const unsigned char*)((const char*)self + OFF_IS_PLAYER_CAT)) return false;
-    return *(const int*)((const char*)self + OFF_INT) <= RADIO_INT_THRESHOLD;
+    return *(const int*)((const char*)self + OFF_INT) <= g_int_limit;
 }
 
 // The joke belongs to one fight, so everything is gated on being in the ice
@@ -584,7 +653,9 @@ static void hooked_add_layer(void* group, void* core, int index,
                              const void* paths, const void* finishes) {
     g_next_add(group, core, index, paths, finishes);
 
-    if (index != LAST_GAME_LAYER || !g_in_iceage) return;
+    if (index != LAST_GAME_LAYER) return;
+    config_load();                   // an edit lands on the next fight
+    if (!g_in_iceage) return;
     if (InterlockedExchange(&g_adding_ours, 1)) return;      // never re-enter
 
     const bool with_intro = g_intro_path[0] != 0;
@@ -623,6 +694,8 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
     g_base = (unsigned char*)GetModuleHandleA(NULL);
 
     trace_open();
+    config_init(mod);
+    config_load();
 
     // Mewjector is required. Without it common/hookapi.inc patches each site with
     // a fixed 24-byte steal never checked against an instruction boundary;
@@ -664,11 +737,13 @@ BOOL APIENTRY DllMain(HMODULE mod, DWORD reason, LPVOID) {
                                          (const void*)&hooked_die, "legendofbunga");
     g_next_turn = (TurnFn)install_hook(SITES[S_BEGINTURN].rva, g_at[S_BEGINTURN], 24,
                                        (const void*)&hooked_turn, "legendofbunga");
+    settingsrow_init();
     if (g_mj.Log)
         g_mj.Log("legendofbunga", "the Lord Bunga radio version: %s",
                  g_next ? "installed" : "FAILED to install");
-    say("legendofbunga: queue=%s turn=%s  update=%s  (player cats at INT <= %d)",
+    say("legendofbunga: queue=%s turn=%s  update=%s  selector=%s  (player cats at INT <= %ld)",
         g_next ? "hooked" : "FAILED", g_next_turn ? "hooked" : "FAILED",
-        g_next_update ? "hooked" : "FAILED", RADIO_INT_THRESHOLD);
+        g_next_update ? "hooked" : "FAILED", g_next_regsel ? "hooked" : "FAILED",
+        g_int_limit);
     return TRUE;
 }
