@@ -29,11 +29,11 @@ glaiel::Button* MenuPanel::register_button(std::string name,
                                            std::function<void()> cb)
 ```
 
-It calls that six times — `topipe`, `tobox`, `familytree`, `nametag_button`,
+It calls that six times `topipe`, `tobox`, `familytree`, `nametag_button`,
 `nextcat_left`, `nextcat_right`. The lover and rival portraits are children of
 the very same clip: the `HouseCatStatus` symbol in `ui.swf` lists `lover` and
 `hater` right alongside `topipe` and `familytree`. The game just never registers
-them — it only shows and hides them, and hangs the hover tooltip off the
+them it only shows and hides them, and hangs the hover tooltip off the
 separate `lover_tt` / `hater_tt` regions.
 
 So this mod hooks the panel's init, lets it register its six buttons, and then
@@ -45,12 +45,12 @@ portraits were already drawn and already kept up to date.
 The tree registers no buttons at all, so there is no named-child route here. But
 `register_button` is only a wrapper: the `Button` constructor underneath takes a
 clip **pointer**, so any clip can become one. The catch is which object it wants
-� a portrait entry's `+0x98` is the clip *component*, and what the constructor
+— a portrait entry's `+0x98` is the clip *component*, and what the constructor
 binds is the display object under it at `[component+0x80]`, which links back at
 `+0x40`. Handing it the component crashes inside the binder.
 
 Clicking has to **leave the tree before selecting**. Selecting while the tree is
-open provably works � `show_cat` returns and the panel holds the new cat � and
+open provably works — `show_cat` returns and the panel holds the new cat — and
 is then thrown away when the tree tears down. So the mod runs the tree's own exit
 action first. That action's callback reads nothing but its captured hud, so a
 two-field stand-in for the `std::function` it normally lives in is enough to
@@ -65,7 +65,7 @@ the existing design rather than as a second highlight competing with the first.
 
 The rule is deliberately **not** the hover rule. Hovering lights both edges
 *above* a cat, up to its parents. What is wanted here is the one edge *below*
-each living cat, connecting it down into the tree � so the loop runs over
+each living cat, connecting it down into the tree — so the loop runs over
 children instead: for every node, if one of its parents is in the house, draw
 that node's edge up to that parent. Each living cat is the parent of exactly one
 node, so it gets exactly one edge, and the examined cat is nobody's parent, so
@@ -90,11 +90,11 @@ HouseCatStatus::show_cat(house_cat, clear_if_null = false)
 Finding `house_cat` is the only fiddly part, and it is what makes the edge cases
 safe rather than lucky.
 
-The panel holds a **HouseCat** — the entity in the house. Its `+0x80` is an id
+The panel holds a **HouseCat** the entity in the house. Its `+0x80` is an id
 into the cat registry, and the **Cat** record that resolves to carries the lover
 id at `+0xbc8` and the rival id at `+0xbd8`. Those ids name a *record*, not an
-entity. So the mod walks the house's HouseCat list — the same list the arrows
-iterate — for the entity carrying that id, then applies the arrows' own
+entity. So the mod walks the house's HouseCat list the same list the arrows
+iterate for the entity carrying that id, then applies the arrows' own
 eligibility test:
 
 | condition | meaning |
@@ -104,12 +104,12 @@ eligibility test:
 
 That set is *by construction* the set of cats the panel can display, so:
 
-- **given away** (Tracy, Jack, Butch, the organ grinder) — no entity carries the
+- **given away** (Tracy, Jack, Butch, the organ grinder) no entity carries the
   id, nothing happens
-- **dead but the body is still in the room** — it is in the list, so it selects,
+- **dead but the body is still in the room** it is in the list, so it selects,
   exactly as the arrows would reach it
-- **in another room while zoomed in** — filtered out, nothing happens
-- **no lover or rival at all** — id is `-1`, nothing happens
+- **in another room while zoomed in** filtered out, nothing happens
+- **no lover or rival at all** id is `-1`, nothing happens
 
 Relationships are stored as ids rather than pointers, so a dangling reference
 is not representable. The panel's own stale-pointer test (a generation stored
@@ -117,7 +117,7 @@ beside the pointer, compared against `[cat-8]`) is checked too, before anything
 is dereferenced.
 
 The click is a no-op when it cannot reach the cat. The icons are not greyed out
-— the hover tooltip stays the only affordance, same as before.
+â€” the hover tooltip stays the only affordance, same as before.
 
 ## Build
 
@@ -190,8 +190,8 @@ A refusal installs nothing at all: the game runs unmodified and
 
 | site | what it is |
 | --- | --- |
-| `0x0e9ac0` | `HouseCatStatus::init` � hooked; registers the panel's buttons |
-| `0x17f7b0` | the family tree's per-frame pass � hooked |
+| `0x0e9ac0` | `HouseCatStatus::init` — hooked; registers the panel's buttons |
+| `0x17f7b0` | the family tree's per-frame pass — hooked |
 | `0x97c2b0` | `MenuPanel::register_button` |
 | `0x97d590` | the `Button` constructor, which takes a clip pointer |
 | `0x0ec7b0` | `HouseCatStatus::show_cat` |
