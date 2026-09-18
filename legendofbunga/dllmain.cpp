@@ -596,7 +596,7 @@ static void hooked_queue(void* self, void* path, int onfinish) {
     if (p && ends_with(p, "_battle.ogg")) g_stream_battle = self;
     if (p && ends_with(p, "_boss.ogg"))   g_stream_boss   = self;
 
-    if (p) TRACE("pass %s", p);
+    if (p) say("pass %s", p);
     g_next(self, path, onfinish);
 }
 

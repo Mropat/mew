@@ -6,8 +6,8 @@
 // does - but it stops it being blank.
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION    1,0,2,0
-PRODUCTVERSION 1,0,2,0
+FILEVERSION    1,1,0,0
+PRODUCTVERSION 1,1,0,0
 FILEOS         VOS_NT_WINDOWS32
 FILETYPE       VFT_DLL
 BEGIN
@@ -17,11 +17,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Mropat"
             VALUE "FileDescription",  "The Legend of Bunga"
-            VALUE "FileVersion",      "1.0.2.0"
+            VALUE "FileVersion",      "1.1.0.0"
             VALUE "InternalName",     "legendofbunga"
             VALUE "OriginalFilename", "legendofbunga.dll"
             VALUE "ProductName",      "mew - Mewgenics mods"
-            VALUE "ProductVersion",   "1.0.2.0"
+            VALUE "ProductVersion",   "1.1.0.0"
             VALUE "Comments",         "Open source: https://github.com/Mropat/mew"
         END
     END

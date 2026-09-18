@@ -382,7 +382,7 @@ static void* hooked_register_selector(void* panel, void* key, void* current,
     const bool ours = k && strcmp(k, SRC_ROW) == 0;
     void* r;
 
-    TRACE("register_selector: panel=%p key=%s", panel, k ? k : "(null)");
+    say("register_selector: panel=%p key=%s", panel, k ? k : "(null)");
     r = g_next_regsel(panel, key, current, options, enabled, fn);
 
     if (ours) {
