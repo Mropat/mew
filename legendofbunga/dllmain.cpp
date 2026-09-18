@@ -110,6 +110,10 @@ static void make_game_string(GameString* out, const char* lit, unsigned long lon
 // but it would also overwrite anything typed in while it was running.
 static wchar_t g_ini[MAX_PATH];
 
+// Set if the settings row could not write its choice back. The file is then
+// behind what the player picked, so re-reading it would quietly undo them.
+static volatile long g_ini_unwritable;
+
 static const char INI_TEMPLATE[] =
     "; The Legend of Bunga\r\n"
     ";\r\n"
@@ -146,7 +150,7 @@ static void config_init(HMODULE self) {
 }
 
 static void config_load(void) {
-    if (!g_ini[0]) return;
+    if (!g_ini[0] || g_ini_unwritable) return;
 
     long v = (long)GetPrivateProfileIntW(L"LegendOfBunga", L"IntLimit",
                                          INT_LIMIT_DEFAULT, g_ini);

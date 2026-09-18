@@ -202,10 +202,15 @@ SelectorWidget* MenuPanel::register_selector(std::string key, std::string curren
                                              bool, std::function<void(std::string)>)
 ```
 
-looks up by name - `key`, `key_left` and `key_right` - through `find_ui_child`
-(`0x5a100`), which returns null rather than creating anything. All 18 of those
-clips are spoken for, one per `register_selector` call site. There is no list to
-append to and no spare row to adopt.
+looks up by name. The value box goes through `find_ui_child` (`0x5a100`), which
+returns null rather than creating anything, and the two arrows through the
+panel's button registry at `0x97c4f0`, which is what makes them clickable. All
+18 of those clips are spoken for, one per `register_selector` call site. There
+is no list to append to and no spare row to adopt.
+
+Worth writing down because it cost a crash: `find_ui_child` is not called on the
+panel. `register_selector` calls it on `[panel+0x38]`, and a MenuPanel passed in
+its own right sends it straight through a garbage vtable.
 
 What there is instead is an engine that can make another copy of anything
 already on screen. A `glaiel::swf::MovieClip` keeps the tag list it was built
@@ -244,6 +249,27 @@ which fixes the whole layout: `_Copy`, `_Move`, `_Do_call`, `_Target_type`,
 call shape - it takes `(this, std::string&&)` and does nothing but write the
 setting.
 
+### The stripe
+
+Every other row sits on a lighter band, and the band is not part of any row - it
+is its own clip, `char 812`, placed behind rows 2 and 4 and carrying no name, so
+`find_ui_child` cannot reach it. It is found by shape instead: of everything in
+the panel it is the only child scaled wider than 1, the row pieces all sitting
+at 1.0 for text and ±0.6 for arrows. The lowest one is the last, and the next
+belongs two row-pitches on - which the video panel confirms, its five stripes
+running -173.8, -89.1, -6.0, 79.2, 164.0, about 84.3 apart.
+
+It is added to the panel *before* the rest of the row, because `addChild`
+appends and the child list is the draw order. Added afterwards it would cover
+the row it is supposed to sit behind.
+
+### Reading the key
+
+`register_selector` takes its key as a `std::string` by value and destroys it on
+the way out. Reading the key after calling the original therefore reads an
+emptied string, and every key in the world looks like `""` - so the hook reads
+it first and calls afterwards.
+
 Every step is checked and the mod is happy without any of it: a missing piece
 means no row, never a half-built one.
 
@@ -256,7 +282,13 @@ in order and dumps it whole. A key the game has never heard of would survive a
 round trip, so the row's value could live there.
 
 It lives in the ini instead, so there is one place to look and one place to
-edit. The row writes it there when you change it.
+edit. The row writes it there when you change it, and if that write fails the
+value is kept for the session and the file is not read again - otherwise the
+next level load would quietly undo the choice.
+
+The limit is read live, on the frame, so changing it from the menu during the
+Lord Bunga fight moves the music under the acting cat straight away, the same
+way a Stoopzerk does.
 
 ## Known
 

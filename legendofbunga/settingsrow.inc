@@ -27,14 +27,22 @@
 #define XFORM_BYTES   0x18
 
 #define OFF_CLIP_TAGS 0xd0       // MovieClip      -> the tag list it plays
+
+// A container's children, from addChild: capacity, count, then four slots
+// inline or a pointer to the rest.
+#define OFF_KIDS_CAP   0xa8
+#define OFF_KIDS_COUNT 0xac
+#define OFF_KIDS_DATA  0xb0
 #define OFF_TEXT_DEF  0x98       // DynamicTextBox -> its DefineEditText
-#define OFF_PANEL_ROW 0x80       // MenuPanel      -> its movieclip
+// A MenuPanel does not answer find_ui_child itself: register_selector looks its
+// own key up through [panel+0x38], which is the component holding the rows.
+#define OFF_PANEL_ROOT 0x38
 
 // The row we copy, and the key of the one we register.
 #define SRC_ROW      "housemeowvol"
 #define PREV_ROW     "meowvol"
 #define ROW_KEY      "bunga_int_limit"
-#define ROW_LABEL    "bunga radio for cats at INT"
+#define ROW_LABEL    "Bunga Stupid Requirement"
 
 typedef void* (*FindChildFn)(void* panel, void* name);
 typedef void  (*AddChildFn)(void* parent, void* child, int clear_flag);
@@ -94,10 +102,11 @@ static void sso_wide(GameWString* s, const wchar_t* lit) {
 // through the game's own allocator - the names here are longer than a
 // std::string holds inline.
 static void* child_of(void* panel, const char* name) {
+    void* root = panel ? *(void**)((char*)panel + OFF_PANEL_ROOT) : 0;
     GameString s;
-    if (!g_find_child) return 0;
+    if (!g_find_child || !root) return 0;
     make_game_string(&s, name, strlen(name));
-    return g_find_child(panel, &s);
+    return g_find_child(root, &s);
 }
 
 // -------------------------------------------------------------- the callback --
@@ -146,10 +155,15 @@ static void fn_call(void* self, void* value) {
     say("settings row: int limit -> %ld", n);
 
     if (g_ini[0]) {
-        wchar_t text[8];
+        wchar_t text[2];
         text[0] = (wchar_t)(L'0' + n);
         text[1] = 0;
-        WritePrivateProfileStringW(L"LegendOfBunga", L"IntLimit", text, g_ini);
+        if (!WritePrivateProfileStringW(L"LegendOfBunga", L"IntLimit", text, g_ini)) {
+            // Keep what was picked for this session rather than let the next
+            // level load read the stale file back over it.
+            InterlockedExchange(&g_ini_unwritable, 1);
+            say("settings row: could not write %S - keeping it in memory only", g_ini);
+        }
     }
 }
 
@@ -205,6 +219,36 @@ static void place(void* obj, void* src, float pitch, const char* name) {
     *(const char**)((char*)obj + OFF_DO_NAME) = name;
 }
 
+// The band behind every other row is a clip of its own and carries no name, so
+// it is found by shape instead: of everything in the panel it is the only thing
+// scaled wider than 1, the row pieces all sitting at 1.0 or 0.6. The one
+// furthest down is the last one, and the next belongs two rows on - which is
+// also why ours is added before the rest of the row and not after. A child goes
+// on the end of the list, and the list is the draw order.
+#define STRIPE_MIN_SCALE 1.5f
+
+static void* last_stripe(void* parent) {
+    const int cap = *(const int*)((const char*)parent + OFF_KIDS_CAP);
+    const int n   = *(const int*)((const char*)parent + OFF_KIDS_COUNT);
+    void* const* kids = (void* const*)((const char*)parent + OFF_KIDS_DATA);
+    void* best = 0;
+    int i;
+
+    if (cap > 4) kids = *(void* const* const*)kids;
+    for (i = 0; i < n; i++) {
+        void* k = kids[i];
+        float scale;
+        if (!k) continue;
+        scale = *(const float*)((const char*)k + OFF_DO_XFORM);
+        if (scale < 0) scale = -scale;
+        if (scale < STRIPE_MIN_SCALE) continue;
+        if (!best || *(const float*)((const char*)k + g_axis)
+                   > *(const float*)((const char*)best + g_axis))
+            best = k;
+    }
+    return best;
+}
+
 static bool adopt(void* src, void* clone) {
     void* parent = *(void**)((char*)src + OFF_DO_PARENT);
     if (!parent || !clone) return false;
@@ -248,6 +292,8 @@ static void add_our_row(void* panel) {
     OptVec options;
     char digit[2];
 
+    say("settings row: panel=%p val=%p left=%p right=%p prev=%p",
+        panel, src_val, src_left, src_right, src_prev);
     if (!src_val || !src_left || !src_right || !src_prev) {
         say("settings row: %s is not where it should be - no row", SRC_ROW);
         return;
@@ -258,6 +304,19 @@ static void add_our_row(void* panel) {
     }
 
     pitch = row_pitch(src_val, src_prev);
+
+    // Underneath first, so everything else in the row draws over it.
+    {
+        void* parent = *(void**)((char*)src_val + OFF_DO_PARENT);
+        void* src_stripe = parent ? last_stripe(parent) : 0;
+        void* stripe = src_stripe ? clone_clip(src_stripe) : 0;
+        if (stripe) {
+            place(stripe, src_stripe, pitch * 2.0f, ROW_KEY "_stripe");
+            adopt(src_stripe, stripe);
+        } else {
+            say("settings row: no stripe to copy (src=%p)", src_stripe);
+        }
+    }
 
     val   = clone_text(src_val);
     left  = clone_clip(src_left);
@@ -313,12 +372,20 @@ static void add_our_row(void* panel) {
 
 // The game's own last audio row is the cue: the panel is in reach, its clips
 // are up, and ours belongs directly underneath it.
+//
+// The key has to be read before the call, not after. register_selector takes it
+// by value and destroys it on the way out, which leaves the caller's string
+// empty - so asking afterwards is asking a corpse, and every key looks like "".
 static void* hooked_register_selector(void* panel, void* key, void* current,
                                       void* options, int enabled, void* fn) {
-    void* r = g_next_regsel(panel, key, current, options, enabled, fn);
     const char* k = str_of(key);
+    const bool ours = k && strcmp(k, SRC_ROW) == 0;
+    void* r;
 
-    if (k && strcmp(k, SRC_ROW) == 0) {
+    TRACE("register_selector: panel=%p key=%s", panel, k ? k : "(null)");
+    r = g_next_regsel(panel, key, current, options, enabled, fn);
+
+    if (ours) {
         config_load();                        // whatever the file says is the row's value
         add_our_row(panel);
     }
