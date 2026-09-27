@@ -567,6 +567,20 @@ static bool ends_with(const char* s, const char* suffix) {
     return n >= m && memcmp(s + n - m, suffix, m) == 0;
 }
 
+// Up only while our own two layers are being built, which is the only window in
+// which a stream playing our track can be one of ours.
+//
+// The track is a real radio song. The house radio plays it by itself, and
+// claiming that stream was claiming the player's radio: it got rewound, had
+// 2.9s discarded in blocks, and then ran dry - audible as the music skipping
+// forward and then stopping. The stream object is reused for the next song, so
+// that one skipped too, until opening the shop rebuilt the stream and the stale
+// pointer stopped matching.
+//
+// QueueSongChunk runs inside the AddLayer call that asks for the layer, so the
+// flag is exact: nothing else in the process can be inside our two calls.
+static volatile long g_claiming;
+
 // --------------------------------------------------------------------
 // music hooks: what is being queued, and where
 // --------------------------------------------------------------------
@@ -575,7 +589,7 @@ static void hooked_queue(void* self, void* path, int onfinish) {
     if (p && ends_with(p, "_intro.ogg") && strlen(p) < sizeof(g_intro_path)) {
         lstrcpynA(g_intro_path, p, sizeof(g_intro_path));   // the zone's own sting
     }
-    if (p && strcmp(p, RADIO_TRACK) == 0) {       // one of our two copies
+    if (p && g_claiming && strcmp(p, RADIO_TRACK) == 0) {   // one of our two copies
         const int si = g_stem[0].stream ? 1 : 0;
         g_stem[si].stream   = self;
         g_stem[si].skip_req = SKIP_SAMPLES;        // trim the count-in
@@ -659,6 +673,15 @@ static void hooked_add_layer(void* group, void* core, int index,
 
     if (index != LAST_GAME_LAYER) return;
     config_load();                   // an edit lands on the next fight
+
+    // A new music set, ours or not. Forget the old one's streams here rather
+    // than below the ice-age gate: the pool reuses addresses, so a pointer kept
+    // past the end of its stream can come to mean a completely different one.
+    g_want = -1; g_mix = 0.0; g_pulls = 0; g_block = 0;
+    g_stem[0].stream = 0;
+    g_stem[1].stream = 0;
+    g_live = 0; g_armed = 0; g_xf = 0.0; g_converged = 0;
+
     if (!g_in_iceage) return;
     if (InterlockedExchange(&g_adding_ours, 1)) return;      // never re-enter
 
@@ -671,20 +694,17 @@ static void hooked_add_layer(void* group, void* core, int index,
     const Vec3 our_paths    = { &g_layer_paths[0], &g_layer_paths[n], &g_layer_paths[n] };
     const Vec3 our_finishes = { &g_layer_finish[0], &g_layer_finish[n], &g_layer_finish[n] };
 
-    g_want = -1; g_mix = 0.0; g_pulls = 0; g_block = 0;
-    // Forget the previous set's streams before adding this one's. A set is
-    // rebuilt on entering the boss room, and the slots used to fill on a
-    // first-come basis - so copy 0 stayed pointed at a dead stream from the
-    // hallway set while the new set's only layer took copy 1.
-    g_stem[0].stream = 0;
-    g_stem[1].stream = 0;
-    g_live = 0; g_armed = 0; g_xf = 0.0; g_converged = 0;
-
     // Two copies, so one can cover the other's loop seam.
     say("adding two radio layers as %d and %d, inside the builder (intro=%s)",
         LAST_GAME_LAYER + 1, LAST_GAME_LAYER + 2, with_intro ? g_intro_path : "none");
+    InterlockedExchange(&g_claiming, 1);
     g_next_add(group, core, LAST_GAME_LAYER + 1, &our_paths, &our_finishes);
     g_next_add(group, core, LAST_GAME_LAYER + 2, &our_paths, &our_finishes);
+    InterlockedExchange(&g_claiming, 0);
+
+    if (!g_stem[0].stream || !g_stem[1].stream)
+        say("only claimed %d of 2 radio streams - the queue is not where it was",
+            (g_stem[0].stream ? 1 : 0) + (g_stem[1].stream ? 1 : 0));
 
     InterlockedExchange(&g_adding_ours, 0);
 }

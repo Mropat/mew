@@ -116,6 +116,27 @@ track]`. Every layer of a set consumes the zone's intro sting before its body
 begins, which is exactly why the four stay sample-aligned; a layer without one
 starts its body about six seconds early and is out of step all fight.
 
+### The track is somebody else's song too
+
+`mom_i_really_hate_you.ogg` is not ours. It is a real radio song, and the house
+radio plays it on its own.
+
+The two layers were identified by watching `QueueSongChunk` for that path, which
+meant the house radio got claimed as one of them: rewound, 2.9s discarded a block
+at a time, and then run dry. Audible as the music skipping forward in chunks and
+then going silent - and the next song skipped too, because a `SoundStream` is
+reused and the pointer still matched. Opening the shop rebuilt the stream, the
+stale pointer stopped matching, and it cleared up on its own, which is why it
+looked random.
+
+The path is not enough to identify a stream. The claim now only stands while our
+own two `AddLayer` calls are on the stack - `QueueSongChunk` runs inside them, so
+nothing else in the process can be mistaken for ours.
+
+Related: the stream pointers are forgotten on every music build now, not only on
+ours. The pool reuses addresses, so a pointer kept past the end of its stream can
+come to mean a different one.
+
 ## Timing, and two traps in it
 
 Anything in this mod that has to be exact runs into the same wall: a stream
