@@ -42,6 +42,7 @@
 #define SRC_ROW      "housemeowvol"
 #define PREV_ROW     "meowvol"
 #define ROW_KEY      "bunga_int_limit"
+#define LABEL_ROW    "SETTINGS_HOUSEMEOWVOLUME"   // the caption we copy
 #define ROW_LABEL    "Bunga Stupid Requirement"
 
 typedef void* (*FindChildFn)(void* panel, void* name);
@@ -177,8 +178,19 @@ static void* movieclip_pool(void) {
     return (void*)(lea + 7 + *(const int*)(lea + 3));
 }
 
+// What each kind of clone needs from its source, separately, so a source can be
+// vetted before a single byte is allocated. Nothing here can hand a pooled
+// object back, so the only way to leak one is to allocate and then discover a
+// problem - and these two are the problems worth discovering first.
+static void* clip_tags(void* src) {
+    return src ? *(void**)((char*)src + OFF_CLIP_TAGS) : 0;
+}
+static void* text_def(void* src) {
+    return src ? *(void**)((char*)src + OFF_TEXT_DEF) : 0;
+}
+
 static void* clone_clip(void* src) {
-    void* tags = *(void**)((char*)src + OFF_CLIP_TAGS);
+    void* tags = clip_tags(src);
     void* o;
     if (!tags) return 0;
     o = g_pool_alloc(movieclip_pool());
@@ -188,7 +200,7 @@ static void* clone_clip(void* src) {
 // A text box knows its own definition, and a definition knows how to make one -
 // so this one needs no pool and no constructor of its own.
 static void* clone_text(void* src) {
-    void* def = *(void**)((char*)src + OFF_TEXT_DEF);
+    void* def = text_def(src);
     void* const* vt;
     if (!def) return 0;
     vt = *(void* const**)def;
@@ -226,6 +238,31 @@ static void place(void* obj, void* src, float pitch, const char* name) {
 // also why ours is added before the rest of the row and not after. A child goes
 // on the end of the list, and the list is the draw order.
 #define STRIPE_MIN_SCALE 1.5f
+
+// How many rows the panel already has, counted by their left arrows - one per
+// selector row, and in Audio Settings every row is a selector. Ours goes on the
+// end, so its number is this plus one.
+//
+// dllmain's ends_with is declared further down than this file is included, so
+// this keeps its own.
+static bool name_ends_with(const char* s, const char* suffix) {
+    const size_t n = strlen(s), m = strlen(suffix);
+    return n >= m && memcmp(s + n - m, suffix, m) == 0;
+}
+
+static int count_rows(void* parent) {
+    const int cap = *(const int*)((const char*)parent + OFF_KIDS_CAP);
+    const int n   = *(const int*)((const char*)parent + OFF_KIDS_COUNT);
+    void* const* kids = (void* const*)((const char*)parent + OFF_KIDS_DATA);
+    int rows = 0, i;
+
+    if (cap > 4) kids = *(void* const* const*)kids;
+    for (i = 0; i < n; i++) {
+        const char* nm = kids[i] ? *(const char**)((char*)kids[i] + OFF_DO_NAME) : 0;
+        if (nm && name_ends_with(nm, "_left")) rows++;
+    }
+    return rows;
+}
 
 static void* last_stripe(void* parent) {
     const int cap = *(const int*)((const char*)parent + OFF_KIDS_CAP);
@@ -286,15 +323,22 @@ static void add_our_row(void* panel) {
     void* src_left  = child_of(panel, SRC_ROW "_left");
     void* src_right = child_of(panel, SRC_ROW "_right");
     void* src_prev  = child_of(panel, PREV_ROW);
+    void* parent    = src_val ? *(void**)((char*)src_val + OFF_DO_PARENT) : 0;
     void *val, *left, *right;
     float pitch;
+    int  row_no;
     GameString key, current, text;
     OptVec options;
     char digit[2];
 
-    say("settings row: panel=%p val=%p left=%p right=%p prev=%p",
-        panel, src_val, src_left, src_right, src_prev);
-    if (!src_val || !src_left || !src_right || !src_prev) {
+    say("settings row: panel=%p val=%p left=%p right=%p prev=%p parent=%p",
+        panel, src_val, src_left, src_right, src_prev, parent);
+
+    // Every check that can be made comes before the first allocation. A pooled
+    // object cannot be handed back, so anything allocated and then abandoned is
+    // gone for the life of the process - and these are the conditions that would
+    // have abandoned one.
+    if (!src_val || !src_left || !src_right || !src_prev || !parent) {
         say("settings row: %s is not where it should be - no row", SRC_ROW);
         return;
     }
@@ -302,20 +346,31 @@ static void add_our_row(void* panel) {
         say("settings row: this panel already has one");
         return;
     }
+    if (!text_def(src_val) || !clip_tags(src_left) || !clip_tags(src_right)) {
+        say("settings row: the row's pieces are not the shape they were");
+        return;
+    }
 
-    pitch = row_pitch(src_val, src_prev);
+    pitch  = row_pitch(src_val, src_prev);
+    row_no = count_rows(parent) + 1;
 
-    // Underneath first, so everything else in the row draws over it.
-    {
-        void* parent = *(void**)((char*)src_val + OFF_DO_PARENT);
-        void* src_stripe = parent ? last_stripe(parent) : 0;
-        void* stripe = src_stripe ? clone_clip(src_stripe) : 0;
+    // The panel bands its even-numbered rows and leaves the odd ones on its own
+    // grey - five audio rows means bands behind 2 and 4. So ours gets one only
+    // when it lands on an even number, and the one it copies is two rows up.
+    if ((row_no % 2) == 0) {
+        void* src_stripe = last_stripe(parent);
+        void* stripe = clip_tags(src_stripe) ? clone_clip(src_stripe) : 0;
         if (stripe) {
+            // Underneath first: a child goes on the end of the list, and the
+            // list is the draw order.
             place(stripe, src_stripe, pitch * 2.0f, ROW_KEY "_stripe");
             adopt(src_stripe, stripe);
         } else {
-            say("settings row: no stripe to copy (src=%p)", src_stripe);
+            say("settings row: row %d wants a band, found none to copy (src=%p)",
+                row_no, src_stripe);
         }
+    } else {
+        say("settings row: row %d is an odd one - no band, panel grey", row_no);
     }
 
     val   = clone_text(src_val);
@@ -339,8 +394,8 @@ static void add_our_row(void* panel) {
     // The label is its own text box, one row down from the one it was copied
     // from, carrying our own words instead of a localisation key.
     {
-        void* src_label = child_of(panel, "SETTINGS_HOUSEMEOWVOLUME");
-        void* label = src_label ? clone_text(src_label) : 0;
+        void* src_label = child_of(panel, LABEL_ROW);
+        void* label = text_def(src_label) ? clone_text(src_label) : 0;
         if (label) {
             place(label, src_label, pitch, ROW_KEY "_label");
             if (adopt(src_label, label) && g_set_text) {
@@ -366,8 +421,8 @@ static void add_our_row(void* panel) {
     g_fn.self = &g_fn;                        // impl == storage, so: local, never freed
 
     g_next_regsel(panel, &key, &current, &options, 0, &g_fn);
-    say("settings row: added below %s, %.1f on axis +0x%x, at INT <= %ld",
-        SRC_ROW, (double)pitch, g_axis, g_int_limit);
+    say("settings row: row %d below %s, %.1f on axis +0x%x, at INT <= %ld",
+        row_no, SRC_ROW, (double)pitch, g_axis, g_int_limit);
 }
 
 // The game's own last audio row is the cue: the panel is in reach, its clips
